@@ -1,0 +1,20 @@
+flowchart LR
+  subgraph Ingest
+    U[Upload] --> F[ffmpeg] --> D[Demuxer]
+  end
+  D -->|append| R[(Redis Streams)]
+  subgraph Delivery
+    H["Hub: one reader per stream"] --> W1[Viewer socket]
+    H --> W2[Viewer socket]
+    H --> W3[Viewer socket]
+  end
+  R -->|read| H
+  W1 -->|positions| S[Server]
+  W2 -->|positions| S
+  W3 -->|positions| S
+  S -->|latest position| RP[(Redis)]
+  S -->|event| K[(Kafka topic)]
+  subgraph Events
+    K --> DB[Dashboard]
+    K --> AN[Analytics]
+  end

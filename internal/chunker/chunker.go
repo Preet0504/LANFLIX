@@ -26,7 +26,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
+	"strconv"
 )
 
 type Config struct {
@@ -34,11 +36,17 @@ type Config struct {
 	InputPath  string
 	GOPSeconds int  // keyframe interval == fragment (segment) boundary
 	Realtime   bool // -re: pace reads at source frame rate, simulating a live encode
+	// FragmentMs > 0 selects low-latency mode: ffmpeg cuts a fragment every
+	// FragmentMs as well as at each keyframe, so a chunk is published as
+	// soon as that much video is encoded instead of a whole GOP. Most such
+	// chunks don't start with a keyframe; Segment.Keyframe says which do.
+	FragmentMs int
 }
 
 type Segment struct {
 	Seq       int64
 	PTSMillis int64
+	Keyframe  bool // a decoder can start here (always true with one segment per GOP)
 	Data      []byte
 }
 
@@ -77,6 +85,14 @@ func Run(ctx context.Context, cfg Config) (initCh <-chan []byte, segments <-chan
 			"-map", "0:a:0?", // "?": don't fail if the source has no audio track
 			"-c:v", "libx264",
 			"-preset", "veryfast",
+		)
+		if cfg.FragmentMs > 0 {
+			// No B-frames, as low-latency encoders do: each frame then shows
+			// in the order it's decoded, so a chunk's decode time is its
+			// display time and seeks land exactly where the chunk index says.
+			args = append(args, "-bf", "0")
+		}
+		args = append(args,
 			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", gop),
 			// No scene-cut keyframes: frag_keyframe starts a fragment at every
 			// keyframe, and segment N is labeled N*gop seconds — an extra
@@ -87,8 +103,11 @@ func Run(ctx context.Context, cfg Config) (initCh <-chan []byte, segments <-chan
 			"-b:a", "128k",
 			"-f", "mp4",
 			"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-			"pipe:1",
 		)
+		if cfg.FragmentMs > 0 {
+			args = append(args, "-frag_duration", strconv.Itoa(cfg.FragmentMs*1000))
+		}
+		args = append(args, "pipe:1")
 
 		cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 		stdout, err := cmd.StdoutPipe()
@@ -121,7 +140,12 @@ func Run(ctx context.Context, cfg Config) (initCh <-chan []byte, segments <-chan
 			close(stderrDone)
 		}()
 
-		demuxErr := Demux(ctx, stdout, gop, initC, segC)
+		var demuxErr error
+		if cfg.FragmentMs > 0 {
+			demuxErr = demuxSubGOP(ctx, stdout, initC, segC)
+		} else {
+			demuxErr = Demux(ctx, stdout, gop, initC, segC)
+		}
 		if demuxErr != nil && demuxErr != io.EOF {
 			_ = cmd.Process.Kill() // stop producing so stderr reaches EOF
 		}
@@ -183,7 +207,7 @@ func Demux(ctx context.Context, stdout io.Reader, gop int, initC chan<- []byte, 
 			data = append(data, pendingMoof...)
 			data = append(data, raw...)
 			select {
-			case segC <- Segment{Seq: seq, PTSMillis: seq * int64(gop) * 1000, Data: data}:
+			case segC <- Segment{Seq: seq, PTSMillis: seq * int64(gop) * 1000, Keyframe: true, Data: data}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -198,6 +222,25 @@ func Demux(ctx context.Context, stdout io.Reader, gop int, initC chan<- []byte, 
 			}
 		}
 	}
+}
+
+// demuxSubGOP is Demux for low-latency mode: sub-GOP fragments, each
+// labeled with its own decode time and keyframe flag.
+func demuxSubGOP(ctx context.Context, r io.Reader, initC chan<- []byte, segC chan<- Segment) error {
+	fragC := make(chan Fragment)
+	errC := make(chan error, 1)
+	go func() {
+		errC <- DemuxFragments(ctx, r, initC, fragC)
+		close(fragC)
+	}()
+	for f := range fragC {
+		select {
+		case segC <- Segment{Seq: f.Seq, PTSMillis: int64(math.Round(f.DecodeMs)), Keyframe: f.Keyframe, Data: f.Data}:
+		case <-ctx.Done():
+			// DemuxFragments sees the same cancellation and closes fragC.
+		}
+	}
+	return <-errC
 }
 
 // tailBuffer is an io.Writer that retains only the last max bytes.

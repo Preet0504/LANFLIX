@@ -170,9 +170,8 @@ func main() {
 
 	store := redisstream.NewStore(*redisAddr)
 	defer store.Close()
-	// Keep the whole run: seeks may target any point, and 200ms chunks
-	// would pass the default retention after ~17 minutes.
-	store.SetMaxLen(0)
+	// Keep the whole run: seeks may target any point in it.
+	store.SetRetention(0)
 
 	room, _, err := store.CreateOrGetRoom(ctx, shortID(), "Benchmark")
 	if err != nil {
@@ -183,6 +182,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := store.RegisterMovie(ctx, llMovieID, room.ID, "Benchmark stream (200ms chunks)"); err != nil {
+		log.Fatal(err)
+	}
+	if err := store.SetChunkMs(ctx, llMovieID, 200); err != nil {
 		log.Fatal(err)
 	}
 	defer func() {

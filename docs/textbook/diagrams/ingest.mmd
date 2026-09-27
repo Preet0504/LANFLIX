@@ -1,0 +1,8 @@
+flowchart LR
+  B["Host browser<br/>multipart upload"] -->|"HTTP POST, streamed"| D[("uploads/&lt;id&gt;/file<br/>on disk")]
+  D --> F["ffmpeg<br/>real-time encode (-re)"]
+  F -->|"stdout pipe:<br/>fragmented MP4 bytes"| X["Demuxer<br/>box parser + state machine"]
+  F -.->|"stderr pipe:<br/>drained, last 8 KB kept"| T["tail buffer"]
+  X -->|"init segment (once)"| R1[("Redis string<br/>movie:&lt;id&gt;:init")]
+  X -->|"fragment + time + keyframe flag"| R2[("Redis Stream<br/>movie:&lt;id&gt;")]
+  X -->|"keyframes only"| R3[("Sorted set<br/>movie:&lt;id&gt;:keyframes")]

@@ -1,0 +1,14 @@
+flowchart LR
+  WS["WebSocket message"] --> K{"text or binary?"}
+  K -->|"text: seek_ack"| ACK["clear awaitAck<br/>if it matches the latest seek"]
+  K -->|binary| Q1{"first message?"}
+  Q1 -->|"yes: init segment"| SB["read avcC / mp4a →<br/>codec string →<br/>addSourceBuffer"]
+  Q1 -->|no| Q2{"awaiting a seek ack?"}
+  Q2 -->|"yes: old position"| DROP["discard"]
+  Q2 -->|no| Q["append queue"]
+  SB --> Q
+  Q -->|"pump: one appendBuffer at a time"| BUF["SourceBuffer"]
+  BUF -->|updateend| PS["apply pending seek<br/>once media covers it"]
+  BUF -->|QuotaExceeded| EV["evict media 15 s+ behind playhead,<br/>else wait 1 s"]
+  BUF --> V["video element → screen"]
+  V -->|"every 2 s"| REP["{position_ms, until_ms}<br/>→ server"]

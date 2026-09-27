@@ -1,0 +1,23 @@
+sequenceDiagram
+  participant P as Player
+  participant R as Server: reader
+  participant M as Server: session loop
+  participant G as Stream goroutine (new generation)
+  participant DB as Redis
+  P->>P: clear append queue, wait for ack of 754000
+  P->>R: {"seek_ms": 754000}
+  R->>R: credit.reset(754000 + 30 s)
+  R->>M: seek 754000
+  M->>M: cancel old generation, generation++
+  M->>P: {"seek_ack": 754000}
+  M->>G: start at 754000
+  G->>DB: ZREVRANGEBYSCORE keyframes 754000 -inf LIMIT 0 1
+  DB-->>G: 754000-378 (keyframe)
+  loop pages of 4, while inside the credit window
+    G->>DB: XRANGE from last id COUNT 4
+    DB-->>G: fragments
+    G->>P: binary fragments (old-generation writes are dropped)
+  end
+  P->>P: apply seek once buffered media covers 754 s
+  P->>R: {"position_ms": 756000, "until_ms": 786000}
+  R->>G: credit extended, sending resumes

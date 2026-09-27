@@ -111,6 +111,9 @@ img { display: block; }
 .input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
 .input::placeholder { color: var(--text-faint); }
 .field-hint { font-size: 13px; color: var(--text-faint); margin-top: 8px; min-height: 20px; }
+.check-row { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; cursor: pointer; font-size: 14px; }
+.check-row input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); flex: none; cursor: pointer; }
+.check-row small { display: block; color: var(--text-faint); font-size: 12.5px; line-height: 1.45; margin-top: 2px; }
 .field-hint.info { color: var(--accent-strong); }
 
 /* ---------- surfaces ---------- */

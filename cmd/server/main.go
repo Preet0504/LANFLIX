@@ -50,6 +50,7 @@ var upgrader = websocket.Upgrader{
 type controlMsg struct {
 	SeekMillis     *float64 `json:"seek_ms"`
 	PositionMillis *float64 `json:"position_ms"`
+	UntilMillis    *float64 `json:"until_ms"` // flow-control grant, see credit
 }
 
 // safeConn serializes writes: when a seek arrives mid-stream, the old and
@@ -209,7 +210,11 @@ func handleWS(w http.ResponseWriter, r *http.Request, store *redisstream.Store, 
 	seekCh := make(chan int64, 1)
 	seekCh <- startMillis // treat the initial join as a "seek" to from_ms
 
-	go readControlMessages(wsConn, seekCh, cancel, store, positions, clientID, movieID)
+	// window_ms: the client does flow control (see credit). Absent: unlimited.
+	windowMs, _ := strconv.ParseInt(r.URL.Query().Get("window_ms"), 10, 64)
+	cr := newCredit(max(windowMs, 0), startMillis)
+
+	go readControlMessages(wsConn, seekCh, cr, cancel, store, positions, clientID, movieID)
 
 	var streamCancel context.CancelFunc
 	for {
@@ -229,12 +234,12 @@ func handleWS(w http.ResponseWriter, r *http.Request, store *redisstream.Store, 
 			}
 			var streamCtx context.Context
 			streamCtx, streamCancel = context.WithCancel(ctx)
-			go streamFrom(streamCtx, conn, epoch, store, live, movieID, from)
+			go streamFrom(streamCtx, conn, epoch, cr, store, live, movieID, from)
 		}
 	}
 }
 
-func readControlMessages(conn *websocket.Conn, seekCh chan int64, cancel context.CancelFunc, store *redisstream.Store, positions *positionlog.Producer, clientID, movieID string) {
+func readControlMessages(conn *websocket.Conn, seekCh chan int64, cr *credit, cancel context.CancelFunc, store *redisstream.Store, positions *positionlog.Producer, clientID, movieID string) {
 	defer cancel()
 
 	// Position pings are written by a single dedicated goroutine, in the
@@ -280,6 +285,9 @@ func readControlMessages(conn *websocket.Conn, seekCh chan int64, cancel context
 		}
 		if msg.SeekMillis != nil {
 			seek := int64(*msg.SeekMillis)
+			// Reset here, in message order: a grant sent before the seek is
+			// applied before this, and one sent after it extends from here.
+			cr.reset(seek)
 			select {
 			case seekCh <- seek:
 			default:
@@ -287,6 +295,9 @@ func readControlMessages(conn *websocket.Conn, seekCh chan int64, cancel context
 				<-seekCh
 				seekCh <- seek
 			}
+		}
+		if msg.UntilMillis != nil {
+			cr.grant(int64(*msg.UntilMillis))
 		}
 		if msg.PositionMillis != nil {
 			select {
@@ -524,6 +535,10 @@ func handleGetRoom(w http.ResponseWriter, r *http.Request, store *redisstream.St
 // streams the upload straight to disk (MultipartReader, not
 // ParseMultipartForm) so a multi-gigabyte movie file is never buffered
 // in memory.
+// lowLatencyChunkMs is the chunk duration of a low-latency upload. The
+// benchmark measured ~0.9s behind live with it, against ~3s with 2s chunks.
+const lowLatencyChunkMs = 200
+
 func handleHostStart(w http.ResponseWriter, r *http.Request, store *redisstream.Store) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -550,6 +565,7 @@ func handleHostStart(w http.ResponseWriter, r *http.Request, store *redisstream.
 
 	movieID := randomMovieID()
 	title := movieID
+	chunkMs := 0 // one chunk per GOP
 	var savedPath string
 
 	for {
@@ -566,6 +582,12 @@ func handleHostStart(w http.ResponseWriter, r *http.Request, store *redisstream.
 			b, _ := io.ReadAll(io.LimitReader(part, 256))
 			if t := string(b); t != "" {
 				title = t
+			}
+		case "low_latency":
+			// 200ms chunks: "Live" plays ~1s behind instead of ~3s.
+			b, _ := io.ReadAll(io.LimitReader(part, 8))
+			if v := string(b); v == "1" || v == "true" || v == "on" {
+				chunkMs = lowLatencyChunkMs
 			}
 		case "video":
 			dir := filepath.Join("uploads", movieID)
@@ -604,6 +626,12 @@ func handleHostStart(w http.ResponseWriter, r *http.Request, store *redisstream.
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
+	if chunkMs > 0 {
+		if err := store.SetChunkMs(r.Context(), movieID, int64(chunkMs)); err != nil {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	go generatePoster(savedPath, movieID)
 	go func() {
@@ -615,13 +643,14 @@ func handleHostStart(w http.ResponseWriter, r *http.Request, store *redisstream.
 			InputPath:  savedPath,
 			GOPSeconds: 2,
 			Realtime:   true,
+			ChunkMs:    chunkMs,
 		}); err != nil {
 			log.Printf("ingest movie=%s: %v", movieID, err)
 		}
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"movie_id": movieID, "title": title})
+	_ = json.NewEncoder(w).Encode(map[string]any{"movie_id": movieID, "title": title, "low_latency": chunkMs > 0})
 }
 
 func handleListMovies(w http.ResponseWriter, r *http.Request, store *redisstream.Store) {
@@ -767,7 +796,7 @@ func handleGetMovie(w http.ResponseWriter, r *http.Request, store *redisstream.S
 // streamFrom backfills from fromMillis then live-tails, writing every
 // chunk as a binary WS frame, until ctx is cancelled (client disconnected
 // or a newer seek superseded this one).
-func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, store *redisstream.Store, live *hub, movieID string, fromMillis int64) {
+func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, cr *credit, store *redisstream.Store, live *hub, movieID string, fromMillis int64) {
 	// Subscribe before backfilling: the live feed then overlaps the backfill
 	// rather than leaving a gap between them. Overlap is skipped by ID below.
 	sub, unsubscribe, err := live.subscribe(movieID)
@@ -780,7 +809,7 @@ func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, store *rediss
 	// Send each backfilled segment as soon as it's read; stop early if a
 	// newer seek cancelled this stream mid-backfill.
 	lastID, err := store.StreamFrom(ctx, movieID, fromMillis, func(c redisstream.Chunk) error {
-		if err := ctx.Err(); err != nil {
+		if err := cr.wait(ctx, c.PTSMillis); err != nil {
 			return err
 		}
 		return conn.WriteBinary(epoch, c.Data)
@@ -801,6 +830,9 @@ func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, store *rediss
 			// from exactly where this viewer is, so nothing is skipped.
 			unsubscribe()
 			err := store.Tail(ctx, movieID, lastID, func(id string, c redisstream.Chunk) error {
+				if err := cr.wait(ctx, c.PTSMillis); err != nil {
+					return err
+				}
 				return conn.WriteBinary(epoch, c.Data)
 			})
 			if err != nil && ctx.Err() == nil && !errors.Is(err, errStaleEpoch) {
@@ -810,6 +842,11 @@ func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, store *rediss
 		case lc := <-sub.ch:
 			if !idAfter(lc.id, lastID) {
 				continue // already sent during backfill
+			}
+			// A paused viewer blocks here; the hub keeps feeding its buffer,
+			// and if that fills, it moves to its own tail (above) on resume.
+			if err := cr.wait(ctx, lc.pts); err != nil {
+				return
 			}
 			if err := conn.WriteBinary(epoch, lc.data); err != nil {
 				return

@@ -288,6 +288,7 @@ async function pollMovie() {
   try { m = await getJSON('/api/movie?id=' + encodeURIComponent(current.movieId)); } catch { return; }
   current.meta = m;
   if (m.has_live_edge) player.liveEdgeMs = m.live_edge_ms;
+  player.chunkMs = m.chunk_ms || player.chunkMs;
   document.title = `${m.title} · LANFLIX`;
   document.getElementById('nowTitle').textContent = m.title;
   document.getElementById('nowMeta').innerHTML = `
@@ -318,7 +319,15 @@ async function drawSideList() {
 
 function togglePlay() { if (video.paused) video.play().catch(() => {}); else video.pause(); }
 function seekBy(delta) { const ms = player.seekTo(video.currentTime * 1000 + delta); toast(`${delta > 0 ? '+' : '−'}10s · ${fmtTime(ms)}`); }
-function goLive() { player.seekTo(player.liveEdgeMs); }
+// The edge polled once a second can be a second stale — as much as the
+// whole margin a low-latency stream keeps — so read it fresh first.
+async function goLive() {
+  try {
+    const m = await getJSON('/api/movie?id=' + encodeURIComponent(current.movieId));
+    if (m.has_live_edge) player.liveEdgeMs = m.live_edge_ms;
+  } catch { /* fall back to the last polled edge */ }
+  player.seekTo(player.liveTargetMs());
+}
 function toggleMute() { video.muted = !video.muted; if (!video.muted && video.volume === 0) video.volume = 0.8; syncMuteIcon(); }
 function toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen(); else playerEl.requestFullscreen?.(); }
 const nerd = document.getElementById('nerd');

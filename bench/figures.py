@@ -186,7 +186,7 @@ strip("seek_ms", "seek.png", "Seek latency into stream history (lower is better;
 bars(lambda c: c["requests_per_min"]["median"], "requests.png", "HTTP requests per viewer per minute at the origin",
      lambda v, k: "1 per session" if k in ("ours", "ours-ll", "webrtc") else f"{v:.0f}/min")
 bars(lambda c: c["media_s_per_session"]["median"] if c.get("media_s_per_session") else None, "segments.png",
-     "Media downloaded per session with 4 seeks (seconds of video): LANFLIX's bandwidth weakness",
+     "Media downloaded per session with 4 seeks (seconds of video)",
      lambda v, k: f"{v:.0f} s")
 bars(lambda c: c["freezes_per_run"]["mean"], "freezes.png",
      "Playback freezes (>250 ms without a new frame) per 15 s of steady playback", lambda v, k: f"{v:.1f}")

@@ -30,6 +30,7 @@ type movieFeed struct {
 
 type liveChunk struct {
 	id   string
+	pts  int64
 	data []byte
 }
 
@@ -90,7 +91,7 @@ func (h *hub) subscribe(movieID string) (*subscription, func(), error) {
 
 func (h *hub) run(ctx context.Context, movieID, startID string, feed *movieFeed) {
 	err := h.store.Tail(ctx, movieID, startID, func(id string, c redisstream.Chunk) error {
-		lc := liveChunk{id: id, data: c.Data} // one buffer shared by every viewer
+		lc := liveChunk{id: id, pts: c.PTSMillis, data: c.Data} // one buffer shared by every viewer
 		h.mu.Lock()
 		for sub := range feed.subs {
 			select {

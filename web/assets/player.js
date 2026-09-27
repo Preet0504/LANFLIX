@@ -1,5 +1,14 @@
 import { clientID, getJSON, SEGMENT_MS } from './app.js';
 
+// Flow control: the server sends media only up to this far ahead of the
+// playhead (the buffer hls.js keeps by default). Every position ping
+// extends the grant; a seek restarts it at the target.
+const WINDOW_MS = 30000;
+
+// How far behind the newest media "Live" lands on a low-latency stream:
+// a few chunks of margin, the LL-HLS PART-HOLD-BACK convention.
+const LL_HOLD_BACK_MS = 600;
+
 // Scan for a box's 4-char type; returns the index of the type field.
 function findBox(u8, type) {
   const [a, b, c, d] = [...type].map((ch) => ch.charCodeAt(0));
@@ -45,6 +54,7 @@ export class StreamPlayer {
     this.conn = null;
     this.movieId = null;
     this.liveEdgeMs = 0;
+    this.chunkMs = SEGMENT_MS; // from the movie's metadata
     this.stats = freshStats();
 
     video.addEventListener('playing', () => {
@@ -112,7 +122,7 @@ export class StreamPlayer {
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const wsUrl = `${proto}://${this.host}/ws?movie=${encodeURIComponent(this.movieId)}` +
-        `&client_id=${encodeURIComponent(clientID())}&from_ms=${encodeURIComponent(fromMs)}`;
+        `&client_id=${encodeURIComponent(clientID())}&from_ms=${encodeURIComponent(fromMs)}&window_ms=${WINDOW_MS}`;
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
       conn.ws = ws;
@@ -122,7 +132,8 @@ export class StreamPlayer {
         this.stats.connectedAt = performance.now();
         conn.timer = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ position_ms: Math.floor(video.currentTime * 1000) }));
+            const pos = Math.floor(video.currentTime * 1000);
+            ws.send(JSON.stringify({ position_ms: pos, until_ms: pos + WINDOW_MS }));
           }
         }, 2000);
       };
@@ -164,15 +175,22 @@ export class StreamPlayer {
   // forward seek after a long backfill froze playback for good. Deferred
   // because touching the element synchronously inside 'updateend' has
   // crashed Chromium's media pipeline here before.
+  //
+  // The server starts at a keyframe at or before the target, but that
+  // chunk's first *displayed* frame can sit slightly after it: B-frames
+  // and audio priming shift presentation by up to a few frames. So a range
+  // starting within half a second after the target counts, and playback
+  // starts at its first frame.
   applyPendingSeek(conn) {
     const t = conn.pendingSeek;
     if (t == null || conn.awaitAck != null) return;
     const b = conn.sb.buffered;
     for (let i = 0; i < b.length; i++) {
-      if (b.start(i) <= t + 0.05 && b.end(i) > t) {
+      if (b.start(i) <= t + 0.5 && b.end(i) > t) {
         conn.pendingSeek = null;
-        if (Math.abs(this.video.currentTime - t) > 0.25) {
-          setTimeout(() => { if (!conn.closed) this.video.currentTime = t; }, 0);
+        const to = Math.max(t, b.start(i));
+        if (Math.abs(this.video.currentTime - to) > 0.25) {
+          setTimeout(() => { if (!conn.closed) this.video.currentTime = to; }, 0);
         }
         return;
       }
@@ -227,7 +245,15 @@ export class StreamPlayer {
 
   // How far playback trails the newest content that exists.
   behindLiveMs() {
-    return Math.max(0, this.liveEdgeMs + SEGMENT_MS - this.video.currentTime * 1000);
+    return Math.max(0, this.liveEdgeMs + this.chunkMs - this.video.currentTime * 1000);
+  }
+
+  // Where "Live" should play from. With 2s chunks: the start of the newest
+  // one. With low-latency chunks: just behind the end of the newest, so a
+  // viewer plays about a second behind real time instead of two to four.
+  liveTargetMs() {
+    if (this.chunkMs >= SEGMENT_MS) return this.liveEdgeMs;
+    return Math.max(0, this.liveEdgeMs + this.chunkMs - LL_HOLD_BACK_MS);
   }
 
   teardown() {

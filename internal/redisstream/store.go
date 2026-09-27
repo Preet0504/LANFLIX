@@ -26,18 +26,17 @@ type Chunk struct {
 }
 
 type Store struct {
-	rdb    *redis.Client
-	maxLen int64
+	rdb         *redis.Client
+	retentionMs int64
 }
 
 func NewStore(addr string) *Store {
-	return &Store{rdb: redis.NewClient(&redis.Options{Addr: addr}), maxLen: defaultMaxLen}
+	return &Store{rdb: redis.NewClient(&redis.Options{Addr: addr}), retentionMs: defaultRetention.Milliseconds()}
 }
 
-// SetMaxLen changes how many chunks each stream retains; 0 keeps all.
-// The default is sized for 2s chunks — a stream of 200ms low-latency
-// chunks would fall out of the cache ten times sooner.
-func (s *Store) SetMaxLen(n int64) { s.maxLen = n }
+// SetRetention changes how much media each stream keeps behind its newest
+// chunk; 0 keeps everything.
+func (s *Store) SetRetention(d time.Duration) { s.retentionMs = d.Milliseconds() }
 
 func (s *Store) Close() error { return s.rdb.Close() }
 
@@ -73,9 +72,13 @@ func (s *Store) GetInit(ctx context.Context, movieID string) ([]byte, error) {
 	return data, nil
 }
 
-// MaxLen bounds how many chunks a stream retains (0 = unbounded). Trimming
-// is approximate ("~") so it stays cheap on every write.
-const defaultMaxLen = 5000
+// defaultRetention is how much media a stream keeps behind its newest
+// chunk. It used to be a chunk count (5000 — about 2.8 hours of 2s
+// chunks), which would give a 200ms low-latency stream only 17 minutes.
+// Entry IDs are presentation timestamps, so XADD's MINID trims by media
+// time directly, whatever the chunk size. Approximate ("~") so it stays
+// cheap on every write.
+const defaultRetention = 3 * time.Hour
 
 // PublishChunk appends a chunk to the movie's stream and returns its entry ID.
 func (s *Store) PublishChunk(ctx context.Context, movieID string, c Chunk) (string, error) {
@@ -83,21 +86,27 @@ func (s *Store) PublishChunk(ctx context.Context, movieID string, c Chunk) (stri
 	// that's what lets RangeFrom seek by PTS with a plain XRANGE instead
 	// of a separate index.
 	id := fmt.Sprintf("%d-%d", c.PTSMillis, c.Seq+1) // +1: Redis rejects the reserved ID "0-0"
-	pipe := s.rdb.TxPipeline()
-	pipe.XAdd(ctx, &redis.XAddArgs{
+	args := &redis.XAddArgs{
 		Stream: streamKey(movieID),
 		ID:     id,
-		MaxLen: s.maxLen,
-		Approx: s.maxLen > 0,
 		Values: map[string]interface{}{
 			"seq":      c.Seq,
 			"pts_ms":   c.PTSMillis,
 			"keyframe": c.Keyframe,
 			"data":     c.Data,
 		},
-	})
+	}
+	minMs := c.PTSMillis - s.retentionMs
+	if s.retentionMs > 0 && minMs > 0 {
+		args.MinID, args.Approx = strconv.FormatInt(minMs, 10), true
+	}
+	pipe := s.rdb.TxPipeline()
+	pipe.XAdd(ctx, args)
 	if c.Keyframe {
 		pipe.ZAdd(ctx, keyframesKey(movieID), redis.Z{Score: float64(c.PTSMillis), Member: id})
+	}
+	if args.MinID != "" {
+		pipe.ZRemRangeByScore(ctx, keyframesKey(movieID), "-inf", "("+args.MinID)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return "", fmt.Errorf("publish chunk seq=%d: %w", c.Seq, err)
@@ -274,6 +283,21 @@ type MovieMeta struct {
 	LiveEdgeMs       int64  `json:"live_edge_ms"`
 	HasLiveEdge      bool   `json:"has_live_edge"`
 	TotalViewersEver int64  `json:"total_viewers_ever"`
+	// ChunkMs is the stream's chunk duration: 2000 (one chunk per GOP) or
+	// 200 in low-latency mode. The live edge is the *start* of the newest
+	// chunk, so clients need it to know where the newest media ends.
+	ChunkMs int64 `json:"chunk_ms"`
+}
+
+// DefaultChunkMs is the chunk duration of streams that don't record one.
+const DefaultChunkMs = 2000
+
+// SetChunkMs records a stream's chunk duration.
+func (s *Store) SetChunkMs(ctx context.Context, movieID string, chunkMs int64) error {
+	if err := s.rdb.HSet(ctx, movieMetaKey(movieID), "chunk_ms", chunkMs).Err(); err != nil {
+		return fmt.Errorf("set chunk_ms: %w", err)
+	}
+	return nil
 }
 
 func movieMetaKey(movieID string) string { return "movie:" + movieID + ":meta" }
@@ -331,6 +355,9 @@ func (s *Store) GetMovieMeta(ctx context.Context, movieID string) (MovieMeta, bo
 	}
 	meta := MovieMeta{ID: movieID, RoomID: vals["room_id"], Title: vals["title"], Status: vals["status"]}
 	meta.StartedAtMs, _ = strconv.ParseInt(vals["started_at_ms"], 10, 64)
+	if meta.ChunkMs, _ = strconv.ParseInt(vals["chunk_ms"], 10, 64); meta.ChunkMs <= 0 {
+		meta.ChunkMs = DefaultChunkMs
+	}
 	if meta.Status != "ended" {
 		if n, err := s.rdb.Exists(ctx, heartbeatKey(movieID)).Result(); err == nil && n == 0 {
 			// Orphaned: its ingester is gone. Persist so the correction

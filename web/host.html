@@ -74,6 +74,11 @@
               <input type="file" id="fileInput" accept="video/*" multiple hidden>
             </label>
             <input class="input" id="titleInput" placeholder="Title (optional, single video)" maxlength="120" style="margin-top:12px">
+            <label class="check-row">
+              <input type="checkbox" id="lowLatency">
+              <span><strong>Low latency</strong>
+                <small>Viewers who press Live watch about 1&nbsp;s behind instead of about 3&nbsp;s. Sends ten times as many, smaller chunks.</small></span>
+            </label>
             <div class="uploads" id="uploads"></div>
           </div>
 
@@ -285,6 +290,7 @@ async function showDashboard() {
     return new Promise((resolve) => {
       const fd = new FormData();
       fd.append('title', title);
+      if (document.getElementById('lowLatency').checked) fd.append('low_latency', '1');
       fd.append('video', file);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/host/start?room=' + encodeURIComponent(roomId));

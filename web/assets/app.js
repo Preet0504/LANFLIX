@@ -64,9 +64,11 @@ export async function watchingNowByMovie() {
   }
 }
 
-// A segment is 2s, and live_edge_ms is the *start* of the newest one.
+// live_edge_ms is the *start* of the newest chunk: 2s, or 200ms for a
+// low-latency stream (chunk_ms).
 export const SEGMENT_MS = 2000;
-export const cachedDuration = (m) => (m.has_live_edge ? m.live_edge_ms + SEGMENT_MS : 0);
+export const chunkMsOf = (m) => m.chunk_ms || SEGMENT_MS;
+export const cachedDuration = (m) => (m.has_live_edge ? m.live_edge_ms + chunkMsOf(m) : 0);
 
 // navigator.clipboard, like crypto.randomUUID, only exists in a secure
 // context — undefined on http://<LAN-IP>. Fall back to the legacy path.

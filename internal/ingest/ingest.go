@@ -22,6 +22,9 @@ type Options struct {
 	GOPSeconds int
 	Realtime   bool
 	FFmpegPath string
+	// ChunkMs is the published chunk duration: 0 for one chunk per GOP,
+	// or e.g. 200 for low-latency mode (see chunker.Config.FragmentMs).
+	ChunkMs int
 }
 
 // Run registers the movie, then encodes and publishes it start to
@@ -31,6 +34,11 @@ type Options struct {
 func Run(ctx context.Context, store *redisstream.Store, opts Options) error {
 	if err := store.RegisterMovie(ctx, opts.MovieID, opts.RoomID, opts.Title); err != nil {
 		return fmt.Errorf("register movie: %w", err)
+	}
+	if opts.ChunkMs > 0 {
+		if err := store.SetChunkMs(ctx, opts.MovieID, int64(opts.ChunkMs)); err != nil {
+			return err
+		}
 	}
 
 	// Refresh well inside the heartbeat's TTL so a slow Redis round trip
@@ -55,6 +63,7 @@ func Run(ctx context.Context, store *redisstream.Store, opts Options) error {
 		InputPath:  opts.InputPath,
 		GOPSeconds: opts.GOPSeconds,
 		Realtime:   opts.Realtime,
+		FragmentMs: opts.ChunkMs,
 	})
 
 	initData, ok := <-initCh
@@ -77,7 +86,7 @@ func Run(ctx context.Context, store *redisstream.Store, opts Options) error {
 		if _, err := store.PublishChunk(ctx, opts.MovieID, redisstream.Chunk{
 			Seq:       seg.Seq,
 			PTSMillis: seg.PTSMillis,
-			Keyframe:  true,
+			Keyframe:  seg.Keyframe,
 			Data:      seg.Data,
 		}); err != nil {
 			_ = store.SetMovieStatus(ctx, opts.MovieID, "ended")

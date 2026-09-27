@@ -126,7 +126,7 @@ ul { padding-left: 20px; }
     <p><strong>WebRTC wins live latency by a wide margin:</strong> <span class="b" data-v="webrtc.latency.median|ms"></span> glass-to-glass, against <span class="b" data-v="ll-hls.latency.median|ms"></span> for the best segment-based system. It cannot seek, rewind or resume, and a joining viewer waits for the next keyframe (<span class="b" data-v="webrtc.ttff.median|ms"></span> to first frame here).</p>
     <p><strong>At equal chunk sizes, LANFLIX and LL-HLS reach near parity on latency</strong>: <span class="b" data-v="ours-ll.latency.median|ms"></span> against <span class="b" data-v="ll-hls.latency.median|ms"></span>, with LL-HLS slightly ahead. Both get new media to the viewer in milliseconds, because hls.js requests each part before it exists and the origin holds the request open. LANFLIX gets there with one socket and reaches the first frame in <span class="b" data-v="ours-ll.ttff.median|ms"></span> (LL-HLS: <span class="b" data-v="ll-hls.ttff.median|ms"></span>). LL-HLS spends about <span class="b" data-v="ll-hls.requests_per_min.median|int"></span> HTTP requests per viewer per minute.</p>
     <p><strong>At 2&nbsp;s segments, push does not lower glass-to-glass latency.</strong> LANFLIX plays <span class="b" data-v="ours.latency.median|s2"></span> behind live against <span class="b" data-v="hls-tuned.latency.median|s2"></span> for tuned HLS; the per-trial ranges overlap. Latency is set by chunk size and hold-back, not by how discovery works. What push does win at 2&nbsp;s is getting each new segment to the viewer in <span class="b" data-v="ours.delivery.median|ms"></span> instead of <span class="b" data-v="hls.delivery.median|ms"></span>, and a first frame in <span class="b" data-v="ours.ttff.median|ms"></span>.</p>
-    <p>LANFLIX loses on <strong>seeking</strong> (<span class="b" data-v="ours.seek.median|ms"></span> against <span class="b" data-v="hls.seek.median|ms"></span> for HLS) and on <strong>bandwidth</strong>: after a seek it pushes everything to the live edge, downloading about five times more media per session. Adding WebRTC and LL-HLS also exposed four bugs in the LANFLIX player and server, fixed before these numbers were taken (<a href="#found">§8</a>).</p>
+    <p>LANFLIX loses on <strong>seeking</strong> (<span class="b" data-v="ours.seek.median|ms"></span> against <span class="b" data-v="hls.seek.median|ms"></span> for HLS) Its other weakness, <strong>bandwidth</strong>, is fixed. Without flow control, a seek made the server push everything to the live edge, about five times more media than HLS. With a 30-second credit window it now downloads <span class="b" data-v="ours.media_s_per_session.median|secs"></span> per session against <span class="b" data-v="hls.media_s_per_session.median|secs"></span> for HLS. Adding WebRTC and LL-HLS also exposed four bugs in the LANFLIX player and server, fixed before these numbers were taken (<a href="#found">§8</a>).</p>
   </section>
 
   <section>
@@ -198,7 +198,7 @@ flowchart LR
       <figcaption><b>Figure 8.</b> HTTP requests per viewer per minute of watching (median of trials), counted at the origin. For LANFLIX and WebRTC this is a single request per session, so the per-minute figure only reflects the ~25&nbsp;s test sessions.</figcaption></figure>
 
     <div class="col"><h3><span class="num">4.2</span>Media downloaded per session</h3>
-      <p>The flip side, and a real weakness. After a seek, LANFLIX's server pushes <em>every</em> chunk from the seek point to the live edge, while hls.js stops at about a 30-second buffer. A session that seeks far back pulls far more data than it will ever watch. The fix is flow control (the client grants the server credit as it plays), which is not built yet.</p></div>
+      <p>Push has no natural brake: the server, not the player, decides how much to send. Without flow control, after a seek LANFLIX's server pushed <em>every</em> chunk from the seek point to the live edge, about five times the media HLS downloaded, most of it never watched. LANFLIX now uses <strong>credit-based flow control</strong>. The player grants the server a 30-second window ahead of its playhead, extended with every position report every 2&nbsp;s, and the server never sends past it. Per-session downloads are now level with HLS. dash.js tuned downloads least because it keeps a very short buffer, and it pays for that in freezes (§3.4).</p></div>
     <figure><div class="fig" id="fSegs"></div>
       <figcaption><b>Figure 9.</b> Seconds of media downloaded per 15&nbsp;s trial with four seeks, median. Lower is better.</figcaption></figure>
   </section>
@@ -248,7 +248,6 @@ flowchart LR
       <li><strong>One machine, loopback.</strong> Client, server and origin share a host, so absolute times are optimistic for a real Wi-Fi network, which adds delay and jitter to every system. WebRTC's jitter buffer in particular would grow.</li>
       <li><strong>No loss on the benchmarked systems.</strong> See §6: loss was only applied to raw UDP.</li>
       <li><strong>WebRTC's startup is pessimistic.</strong> The shared encoder can't send a keyframe on request, as a dedicated WebRTC sender would.</li>
-      <li><strong>LANFLIX-LL is a benchmark configuration.</strong> The server, store and player handle 200&nbsp;ms chunks, but the app's upload path still produces 2&nbsp;s chunks.</li>
       <li><strong>Not tested:</strong> LL-DASH (chunked CMAF), and WebRTC with a player tuned for minimum jitter buffer.</li>
       <li><strong>Synthetic source.</strong> A test pattern, 720p30, one bitrate. No system used adaptive bitrate.</li>
     </ul>
@@ -292,6 +291,7 @@ const fmt = {
   mbps: (v) => Math.round(v) + ' Mb/s',
   x: (v) => v.toFixed(1) + '×',
   raw: (v) => String(v),
+  secs: (v) => Math.round(v) + ' s',
 };
 
 const LOAD = DATA.load || [];
@@ -579,7 +579,7 @@ const M = [
   ['Seek into stream history', ['p', fmt.ms(C.ours.seek.median)], ['y', fmt.ms(C.hls.seek.median)], ['y', fmt.ms(C.dash.seek.median)], ['n', 'Impossible'], ['n', 'Impossible']],
   ['Freezes in steady playback', ['y', 'None'], ['y', `~None (tuned ${C['hls-tuned'].freezes_per_run.mean.toFixed(1)} per 15 s)`], ['n', `${C.dash.freezes_per_run.mean.toFixed(1)}–${C['dash-tuned'].freezes_per_run.mean.toFixed(1)} per 15 s`], ['y', 'None (no loss)'], ['p', 'Corruption instead']],
   ['Origin load per viewer', ['y', '1 socket / session'], ['n', `${Math.round(C.hls.requests_per_min.median)}–${Math.round(C['ll-hls'].requests_per_min.median)} req / min`], ['n', `${Math.round(C['dash-tuned'].requests_per_min.median)}–${Math.round(C.dash.requests_per_min.median)} req / min`], ['y', '1 connection'], ['y', 'None']],
-  ['Bandwidth after a seek', ['n', 'Pushes to live edge'], ['y', 'Bounded buffer'], ['y', 'Bounded buffer'], ['p', 'n/a'], ['p', 'n/a']],
+  ['Bandwidth after a seek', ['y', '30 s credit window'], ['y', 'Bounded buffer'], ['y', 'Bounded buffer'], ['p', 'n/a'], ['p', 'n/a']],
   ['Intact delivery under packet loss', ['y', 'TCP'], ['y', 'TCP'], ['y', 'TCP'], ['p', 'NACK + jitter buffer (not tested)'], ['n', udp1 ? fmt.int(udp1.decode_errors) + ' decode errors/min at 1%' : 'No']],
   ['Built into the design', null],
   ['Join late, watch from the start', ['y'], ['y', 'EVENT playlist'], ['y', 'Time-shift window'], ['n'], ['n']],

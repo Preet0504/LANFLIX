@@ -12,6 +12,8 @@ Under the hood, video segments live in **Redis Streams** and are **pushed** to b
 |---|---|---|
 | ![Landing page](docs/screenshots/landing.png) | ![Host dashboard](docs/screenshots/host-dashboard.png) | ![Room view](docs/screenshots/room.png) |
 
+**Learning from this project?** [docs/textbook/](docs/textbook/README.md) is a 16-chapter textbook that teaches system design through LANFLIX, from how video compression works to Redis Streams, flow control, Kafka and benchmarking.
+
 ## Contents
 
 - [Features](#features)
@@ -30,6 +32,7 @@ Under the hood, video segments live in **Redis Streams** and are **pushed** to b
 **For hosts**
 - Create a room, or reopen one you already have. Room names are unique, so creating "Movie Night" twice takes you back to the same room.
 - Drop in one or many videos. Each becomes its own live stream in the room, and any format ffmpeg can read works.
+- Tick **Low latency** to stream in 200 ms chunks: viewers who press Live watch about 1 s behind instead of 2–4 s.
 - Per-room dashboard: stream count, live count, viewers watching now, all-time viewers, and a shareable LAN link.
 - Delete a stream or a whole room. This frees the Redis cache and the uploaded file.
 
@@ -55,7 +58,7 @@ Under the hood, video segments live in **Redis Streams** and are **pushed** to b
 - "Start at 12:34" is an `XREVRANGE` to find the segment containing that time, then paged `XRANGE`s forward.
 - "Follow live" is a blocking `XREAD`.
 
-**Delivery.** Each viewer holds one WebSocket. The server sends the init segment once, then pushes every segment as a binary message the moment it exists. There are no playlists and no polling.
+**Delivery.** Each viewer holds one WebSocket. The server sends the init segment once, then pushes every segment as a binary message the moment it exists. There are no playlists and no polling. **Flow control** keeps push from flooding the viewer: the player grants the server a 30-second window ahead of its playhead, extended with every position report, and the server never sends past it. A viewer who seeks back an hour receives 30 seconds of video, not the whole hour.
 
 A fan-out hub keeps **one** Redis tail per live stream, whatever the viewer count. A new viewer subscribes to the hub *before* backfilling history, so no segment can fall into the gap between the two. A viewer that falls more than 64 segments behind is moved off the hub onto its own tail, so a slow client never delays the others.
 
@@ -97,7 +100,7 @@ Open **http://localhost:8090**, choose **Host**, name a room and drop in a video
 Run the tests with `go test ./...`.
 
 **Command-line tools**
-- `go run ./cmd/producer -input movie.mp4 -movie demo -room cli` ingests a file without the web UI.
+- `go run ./cmd/producer -input movie.mp4 -movie demo -room cli [-chunk-ms 200]` ingests a file without the web UI.
 - `go run ./cmd/wsclient -addr localhost:8090 -movie demo -from-ms 30000` is a headless viewer, for testing.
 - `go run ./cmd/consumer -movie demo` dumps a stream's segments straight from Redis.
 
@@ -129,7 +132,7 @@ All endpoints are on the server (`:8090`) unless noted.
 | `GET` | `/api/rooms` | All rooms, with stream count, live count and poster |
 | `GET` | `/api/room?id=` | One room |
 | `POST` | `/api/room/delete?id=` | Delete a room and all its streams. Returns `409` while any stream is still live |
-| `POST` | `/api/host/start?room=` | `multipart/form-data` with `video` (file) and optional `title`. Returns `{movie_id, title}` |
+| `POST` | `/api/host/start?room=` | `multipart/form-data` with `video` (file), optional `title`, and optional `low_latency=1` for 200 ms chunks. Returns `{movie_id, title, low_latency}` |
 | `GET` | `/api/movies?room=` | Streams in a room (or all streams if `room` is omitted) |
 | `GET` | `/api/movie?id=` | One stream's metadata: status, live edge, duration |
 | `POST` | `/api/movie/delete?id=` | Delete a stream: Redis data, analytics and the uploaded file. Returns `409` while it is still live |
@@ -139,13 +142,14 @@ All endpoints are on the server (`:8090`) unless noted.
 | `GET` | `/api/server-info` | LAN address and port, for share links |
 | `GET` | `:8091/api/viewers` | Who is watching what, right now (dashboard service) |
 
-**WebSocket:** `GET /ws?movie=<id>&client_id=<id>[&from_ms=<ms>]`
+**WebSocket:** `GET /ws?movie=<id>&client_id=<id>[&from_ms=<ms>][&window_ms=30000]`
 - Server → client, binary: the MP4 init segment first, then one `moof+mdat` media chunk per message, ready for `SourceBuffer.appendBuffer`.
 - Server → client, text: `{"seek_ack": 754000}` marks where the media for a new position begins (sent on join and after every seek). Binary messages that arrive between a seek and its ack were pushed for the old position, and the player drops them.
 - Client → server, text (JSON):
   - `{"seek_ms": 754000}` restarts delivery from the last keyframe at or before that time.
-  - `{"position_ms": 812345}` reports the playback position.
+  - `{"position_ms": 812345, "until_ms": 842345}` reports the playback position and grants the server credit to send media up to `until_ms` (flow control).
 - If `from_ms` is omitted, the server resumes from this `client_id`'s saved position.
+- `window_ms` turns on flow control: the server sends at most that much media past the playhead until the client grants more. Without it, delivery is unlimited, as for older clients.
 
 ---
 
@@ -155,10 +159,11 @@ The full interactive report, with every chart, per-trial data and the method, is
 
 ### The short version
 
-- **WebRTC is the latency winner by a wide margin:** 115 ms glass-to-glass, about 7× lower than anything segment-based. It can't rewind, seek or resume, though, and a joining viewer waits for the next keyframe.
-- **At equal chunk sizes, LANFLIX and LL-HLS are close to parity on latency** (935 ms vs 843 ms, LL-HLS slightly ahead). LANFLIX starts faster (94 ms vs 214 ms to first frame) and uses one socket per viewer instead of about 718 HTTP requests per minute.
-- **At 2 s segments, LANFLIX's latency is no better than tuned HLS** (3.16 s vs 2.91 s; the per-trial ranges overlap). What sets latency is chunk size and how far behind live a player starts, not push versus poll. What push does win at 2 s is getting each new segment to the viewer in 7 ms instead of 0.5–1 s, and a first frame in 61 ms instead of about 225 ms.
-- **LANFLIX's weaknesses:** seeking is slower than HLS (31 ms vs 16 ms), and it downloads about 5× more media per session, because after a seek the server pushes everything up to the live edge.
+- **WebRTC is the latency winner by a wide margin:** 121 ms glass-to-glass, about 8× lower than anything segment-based. It can't rewind, seek or resume, though, and a joining viewer waits for the next keyframe.
+- **At equal chunk sizes, LANFLIX and LL-HLS are close to parity on latency** (979 ms vs 914 ms, LL-HLS slightly ahead). LANFLIX starts faster (85 ms vs 233 ms to first frame) and uses one socket per viewer instead of about 717 HTTP requests per minute.
+- **At 2 s segments, LANFLIX's latency is no better than tuned HLS** (3.11 s vs 2.87 s; the per-trial ranges overlap). What sets latency is chunk size and how far behind live a player starts, not push versus poll. What push does win at 2 s is getting each new segment to the viewer in 7 ms instead of 0.5–0.8 s, and a first frame in 64 ms instead of about 220 ms.
+- **Flow control removed LANFLIX's bandwidth problem.** It now downloads as much media per session as HLS (146 s vs 152 s). Before flow control, a seek made the server push everything up to the live edge, about 5× more.
+- **Where LANFLIX still loses:** seeking is somewhat slower than HLS (25–31 ms vs 19 ms).
 
 An earlier version of this benchmark (5 systems, before the fixes listed below) showed LANFLIX ahead of tuned HLS on latency. That lead was an artifact: each system joined at the same point in the segment cycle on every trial. With joins randomized, it disappeared.
 
@@ -193,34 +198,36 @@ To make the comparison fair, **one ffmpeg encoder feeds every system at the same
 
 | Metric | **LANFLIX** | **LANFLIX-LL** | HLS | HLS tuned | LL-HLS | DASH | DASH tuned | WebRTC |
 |---|---|---|---|---|---|---|---|---|
-| Time to first frame | 61 ms | 94 ms | 225 ms | 226 ms | 214 ms | 227 ms | 230 ms | 1.06 s |
-| Glass-to-glass delay | 3.16 s | 935 ms | 7.30 s | 2.91 s | 843 ms | 4.71 s | 3.81 s | 115 ms |
-| New-media delivery, median / p95 | 7 ms / 21 ms | 3 ms / 4 ms | 1.07 s / 1.96 s | 483 ms / 1.48 s | 7 ms / 10 ms | 991 ms / 2.08 s | 1.40 s / 2.06 s | — (per packet) |
-| Seek into history | 31 ms | 32 ms | 16 ms | 14 ms | 20 ms | 27 ms | 28 ms | not possible |
-| Freezes per 15 s (>250 ms) | 0.0 | 0.0 | 0.0 | 0.2 | 0.0 | 1.4 | 3.5 | 0.0 |
-| HTTP requests / min | 1 per session | 1 per session | 247 | 237 | 718 | 750 | 206 | 1 per session |
-| Media downloaded / session | 720 s | 738 s | 153 s | 146 s | 148 s | 233 s | 37 s | — |
+| Time to first frame | 64 ms | 85 ms | 224 ms | 214 ms | 233 ms | 214 ms | 218 ms | 1.40 s |
+| Glass-to-glass delay | 3.11 s | 979 ms | 7.28 s | 2.87 s | 914 ms | 4.71 s | 3.93 s | 121 ms |
+| New-media delivery, median / p95 | 7 ms / 30 ms | 3 ms / 4 ms | 808 ms / 1.65 s | 507 ms / 1.86 s | 7 ms / 11 ms | 750 ms / 1.73 s | 1.60 s / 1.95 s | — (per packet) |
+| Seek into history | 31 ms | 25 ms | 19 ms | 20 ms | 22 ms | 31 ms | 33 ms | not possible |
+| Freezes per 15 s (>250 ms) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 1.9 | 3.9 | 0.1 |
+| HTTP requests / min | 1 per session | 1 per session | 247 | 240 | 717 | 786 | 196 | 1 per session |
+| Media downloaded / session | 146 s | 141 s | 152 s | 148 s | 149 s | 234 s | 36 s | — |
 
-WebRTC detail: connecting took 374 ms. The rest of its 1.06 s startup is waiting for the next keyframe, because this shared encoder can't answer a new viewer's keyframe request the way a dedicated WebRTC encoder would. Its jitter buffer averaged 56 ms, with no packets lost.
+WebRTC detail: connecting took 370 ms. The rest of its 1.40 s startup is waiting for the next keyframe, because this shared encoder can't answer a new viewer's keyframe request the way a dedicated WebRTC encoder would. Its jitter buffer averaged 55 ms, with no packets lost.
 
 ![Glass-to-glass latency](docs/figures/latency.png)
 ![Time to first frame](docs/figures/ttff.png)
 ![Delivery CDF](docs/figures/delivery-cdf.png)
 
-**Why LL-HLS delivers as fast as push:** hls.js requests each part as a *preload hint* before the part exists, and the origin holds that request open until it does. That's push-like delivery built out of HTTP, and it's why LL-HLS matches LANFLIX-LL on delivery (7 ms vs 3 ms). The cost is visible in the requests chart: about 718 HTTP requests per viewer per minute, where LANFLIX uses one socket.
+**Why LL-HLS delivers as fast as push:** hls.js requests each part as a *preload hint* before the part exists, and the origin holds that request open until it does. That's push-like delivery built out of HTTP, and it's why LL-HLS matches LANFLIX-LL on delivery (7 ms vs 3 ms). The cost is visible in the requests chart: about 717 HTTP requests per viewer per minute, where LANFLIX uses one socket.
 
 ![Requests per minute](docs/figures/requests.png)
 ![Freezes](docs/figures/freezes.png)
 
-### Where LANFLIX loses
-
-![Seek latency](docs/figures/seek.png)
-
-**Seeking** is about twice as slow as HLS (31 ms vs 16 ms). Both are imperceptible, but it's a consistent gap. HLS fetches just the segment it needs; LANFLIX restarts a Redis read and a stream.
+### Bandwidth: what flow control changed
 
 ![Media per session](docs/figures/segments.png)
 
-**Bandwidth after a seek.** Push has no brakes. After a seek, the server streams everything from that point up to the live edge as fast as the socket allows, about 5× more media than HLS downloads. On a LAN this is cheap. On a metered link it wouldn't be, and it is also what caused two of the bugs below. The fix is client-driven flow control (the player grants the server credit as it plays). It is designed but not built.
+Push has no natural brake. Without flow control, after a seek the server streamed everything from that point to the live edge as fast as the socket allowed: **720 s of video per test session, about 5× what HLS downloaded.** Now the player grants the server a 30-second window ahead of its playhead, extended with every position report, and the server never sends past it. LANFLIX now downloads **146 s per session, level with HLS (152 s)**. DASH tuned downloads least (36 s) because dash.js keeps a very short buffer, and it pays for that in freezes.
+
+### Where LANFLIX still loses
+
+![Seek latency](docs/figures/seek.png)
+
+**Seeking** is somewhat slower than HLS: 25–31 ms against 19 ms. All are imperceptible, but the gap is consistent. HLS fetches exactly the segment it needs; LANFLIX restarts a Redis read and a stream on the server.
 
 ### Scaling (one server, 1 → 200 concurrent viewers)
 
@@ -264,24 +271,24 @@ A busy home Wi-Fi network commonly loses 1 % or more of packets. LANFLIX, HLS an
 
 | | **LANFLIX** | HLS / LL-HLS | DASH | WebRTC | UDP multicast |
 |---|---|---|---|---|---|
-| Live latency (measured) | 🟡 0.94 s (200 ms chunks) / 3.2 s (2 s) | 🟡 0.84 s (LL) / 2.9 s (tuned) | ❌ 3.8 s tuned | ✅ 0.12 s | ✅ ~immediate |
-| Time to first frame | ✅ 61–94 ms | 🟡 ~220 ms | 🟡 ~230 ms | ❌ 1.06 s (keyframe wait) | 🟡 next keyframe |
-| New media reaches viewer | ✅ 3–7 ms push | 🟡 7 ms (LL) / 0.5–1 s | ❌ ~1–1.4 s | ✅ per packet | ✅ immediate |
-| Seek into history | 🟡 31 ms | ✅ 14–20 ms | ✅ 27 ms | ❌ impossible | ❌ impossible |
-| Freezes in steady playback | ✅ none | ✅ ~none | ❌ 1.4–3.5 per 15 s | ✅ none (no loss) | 🟡 corruption instead |
-| Origin load per viewer | ✅ 1 socket | ❌ 240–720 req/min | ❌ 200–750 req/min | ✅ 1 connection | ✅ none |
-| Bandwidth after a seek | ❌ pushes to live edge | ✅ bounded buffer | ✅ bounded buffer | — | — |
+| Live latency (measured) | 🟡 0.98 s (200 ms chunks) / 3.1 s (2 s) | 🟡 0.91 s (LL) / 2.9 s (tuned) | ❌ 3.9 s tuned | ✅ 0.12 s | ✅ ~immediate |
+| Time to first frame | ✅ 64–85 ms | 🟡 ~215–235 ms | 🟡 ~215 ms | ❌ 1.40 s (keyframe wait) | 🟡 next keyframe |
+| New media reaches viewer | ✅ 3–7 ms push | 🟡 7 ms (LL) / 0.5–0.8 s | ❌ ~0.75–1.6 s | ✅ per packet | ✅ immediate |
+| Seek into history | 🟡 25–31 ms | ✅ 19–22 ms | 🟡 31 ms | ❌ impossible | ❌ impossible |
+| Freezes in steady playback | ✅ none | ✅ none | ❌ 1.9–3.9 per 15 s | ✅ ~none (no loss) | 🟡 corruption instead |
+| Origin load per viewer | ✅ 1 socket | ❌ 240–720 req/min | ❌ 200–790 req/min | ✅ 1 connection | ✅ none |
+| Bandwidth after a seek | ✅ 30 s window (flow control) | ✅ bounded buffer | ✅ bounded buffer | — | — |
 | Join late, watch from start | ✅ | ✅ EVENT playlist | ✅ time-shift window | ❌ | ❌ |
 | Server-side resume across sessions | ✅ | ❌ app must build it | ❌ app must build it | ❌ | ❌ |
 | Per-viewer analytics pipeline | ✅ Kafka | ❌ beacons needed | ❌ beacons needed | 🟡 stats API | ❌ |
 | Adaptive bitrate | ❌ | ✅ | ✅ | ✅ (encoder adapts) | ❌ |
 | CDN / HTTP-cache friendly | ❌ | ✅ | ✅ | ❌ | ❌ |
-| Plays on iPhone | ❌ needs MSE | ✅ native | ❌ needs MSE | ✅ | ❌ |
+| Plays on iPhone | ❌ not yet (iPhone has only ManagedMediaSource) | ✅ native | ❌ needs MSE | ✅ | ❌ |
 | Network egress for N viewers | ❌ N × bitrate | ❌ N × bitrate | ❌ N × bitrate | ❌ N × bitrate | ✅ 1 × |
 
 **Which to use:**
 - **For a live, interactive stream** (a watch party with voice, a camera, a game), use WebRTC.
-- **For a LAN library** that people rewind, resume, join late and scrub through, LANFLIX's design fits best: server-side resume, per-viewer analytics, one socket per viewer and the fastest startup. In low-latency mode it matches LL-HLS on latency.
+- **For a LAN library** that people rewind, resume, join late and scrub through, LANFLIX's design fits best: server-side resume, per-viewer analytics, one socket per viewer, the fastest startup, and HLS-level bandwidth. In low-latency mode it comes close to LL-HLS on latency.
 - **For the internet, iPhones or CDNs**, use HLS/LL-HLS.
 
 ## Reproducing the benchmark
@@ -329,7 +336,7 @@ Building and running the benchmark found real bugs in the product. All were fixe
 
 **Found while adding WebRTC and LL-HLS**
 - **Viewers started up to 2 s further behind than asked.** Chromium clamps a seek past the end of buffered media to that end. With one chunk per GOP, the first chunk always covered the start point, which hid this. With 200 ms chunks, the server starts at the preceding keyframe, and the player landed there instead. Fixed: the player applies a start or seek position once buffered media covers it.
-- **Seeks stuck behind stale pushed data: up to 11 s with 200 ms chunks.** After a far-back seek, the previous position's backfill (thousands of chunks) was still queued in the player and in flight on the socket. Fixed with **seek epochs**: the server drops writes from superseded streams and sends a `seek_ack` marker, and the player clears its queue and drops anything before the ack. In the final run, all 80 LANFLIX seeks completed, the slowest in 69 ms. There's a regression test in [epoch_test.go](cmd/server/epoch_test.go).
+- **Seeks stuck behind stale pushed data: up to 11 s with 200 ms chunks.** After a far-back seek, the previous position's backfill (thousands of chunks) was still queued in the player and in flight on the socket. Fixed with **seek epochs**: the server drops writes from superseded streams and sends a `seek_ack` marker, and the player clears its queue and drops anything before the ack. In the final run, all 80 LANFLIX seeks completed. There's a regression test in [epoch_test.go](cmd/server/epoch_test.go).
 - **A CPU-burning retry loop: about 30,000 failed appends per second.** When pushed-ahead media filled the browser's buffer quota, the player "freed" an empty range, which retried the append immediately. Fixed: it evicts only what is actually behind the playhead, and otherwise waits.
 - **A forward seek after a long backfill froze playback for good.** This was the same clamping as the first bug, hit mid-session. Fixed by the same change.
 - **In the benchmark itself:** the encoder clock was first calibrated with a plain minimum, which locked onto frames that ffmpeg releases early at each loop of the source (about 300 ms off). The runner also joined every system at the same point of the segment cycle on every trial. Both were fixed, and the results were re-measured.
@@ -346,11 +353,9 @@ Building and running the benchmark found real bugs in the product. All were fixe
 ## Limitations
 
 - **No authentication.** Anyone on the network can host, watch or delete. That is fine for a home network, but not for an office network.
-- **No flow control.** After a seek the server pushes up to the live edge. The player now copes with that (see the bugs above), but it still costs bandwidth and memory.
 - **Single server.** Redis and the server are single instances. The architecture would shard by stream, but that is not built.
 - **One rendition.** There is no adaptive bitrate, so every viewer gets the same 720p stream.
-- **The low-latency mode is benchmark-only so far.** The app ingests 2 s chunks. The server, store and player all handle 200 ms chunks; the upload path doesn't produce them yet.
-- **iPhone Safari** has no MediaSource Extensions, so it can't play streams. (iPad and desktop Safari can.)
+- **iPhone Safari** offers only `ManagedMediaSource` (iOS 17.1+), a variant where the browser controls buffering; the player uses classic MSE, so iPhones can't play streams yet. (iPad and desktop Safari can.)
 - **The benchmark ran on one machine over loopback,** with no network loss applied to the TCP systems or to WebRTC.
 - Uploaded files are kept in `uploads/` until the stream is deleted.
 

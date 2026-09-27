@@ -1,0 +1,125 @@
+<title>Building LANFLIX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --paper: #f5f6f8;
+  --page: #ffffff;
+  --ink: #15181e;
+  --ink-2: #444b57;
+  --ink-3: #737b88;
+  --rule: #e2e5ea;
+  --code-bg: #f0f2f5;
+  --accent: #1f4fd1;
+  --accent-soft: #e6edfd;
+  --tally: #d6333a;
+  --principle-bg: #eef3fe;
+  --ex-bg: #f7f7f3;
+  --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --sans: "Archivo", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1014; --page: #14171d; --ink: #e8eaee; --ink-2: #b5bcc8; --ink-3: #858d9a;
+    --rule: #262a33; --code-bg: #1b1f27; --accent: #86a6ff; --accent-soft: #1b2440;
+    --tally: #ff6b70; --principle-bg: #182033; --ex-bg: #191b20;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1014; --page: #14171d; --ink: #e8eaee; --ink-2: #b5bcc8; --ink-3: #858d9a;
+  --rule: #262a33; --code-bg: #1b1f27; --accent: #86a6ff; --accent-soft: #1b2440;
+  --tally: #ff6b70; --principle-bg: #182033; --ex-bg: #191b20;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--paper); color: var(--ink); font-family: var(--serif); font-size: 18px; line-height: 1.65; margin: 0; }
+.layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); max-width: 1320px; margin: 0 auto; gap: 40px; padding-inline: 24px; }
+nav.toc { position: sticky; top: env(safe-area-inset-top, 0px); align-self: start; max-height: 100vh; overflow-y: auto; padding-block: 36px; font-family: var(--sans); }
+nav.toc .brand { font-weight: 800; font-size: 20px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 9px; }
+nav.toc .brand i { width: 10px; height: 10px; border-radius: 50%; background: var(--tally); display: inline-block; box-shadow: 0 0 0 4px color-mix(in srgb, var(--tally) 18%, transparent); }
+nav.toc .sub { font-size: 13px; color: var(--ink-3); margin: 6px 0 22px; line-height: 1.45; }
+nav.toc ol { list-style: none; padding: 0; margin: 0; }
+nav.toc li a { display: flex; gap: 10px; padding: 6px 10px; border-radius: 7px; color: var(--ink-2); text-decoration: none; font-size: 14px; line-height: 1.35; }
+nav.toc li a:hover { background: var(--accent-soft); color: var(--ink); }
+nav.toc li a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav.toc .n { font-family: var(--mono); font-size: 12px; color: var(--ink-3); min-width: 18px; padding-top: 2px; }
+main { padding-block: 36px 120px; min-width: 0; }
+.cover { background: var(--page); border: 1px solid var(--rule); border-radius: 14px; padding: 48px 56px; margin-bottom: 28px; }
+.cover .eyebrow { color: var(--tally); }
+.cover h1 { font-family: var(--sans); font-size: clamp(34px, 5vw, 52px); line-height: 1.05; margin: 12px 0 18px; letter-spacing: -0.02em; text-wrap: balance; max-width: 18ch; }
+.chapter { background: var(--page); border: 1px solid var(--rule); border-radius: 14px; padding: 48px 56px; margin-bottom: 28px; }
+.content-w, .chapter > p, .chapter > ul, .chapter > ol, .chapter > h2, .chapter > h3, .chapter > blockquote, .cover > p, .cover > ul, .cover > h2, .cover > ol { max-width: 68ch; }
+.eyebrow { font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.ch-head { border-bottom: 1px solid var(--rule); padding-bottom: 22px; margin-bottom: 26px; }
+.ch-head h1 { font-family: var(--sans); font-size: clamp(30px, 4vw, 42px); line-height: 1.1; margin: 8px 0 0; letter-spacing: -0.015em; text-wrap: balance; }
+h2 { font-family: var(--sans); font-size: 25px; line-height: 1.25; margin: 46px 0 10px; letter-spacing: -0.01em; text-wrap: balance; }
+h3 { font-family: var(--sans); font-size: 19px; margin: 32px 0 6px; text-wrap: balance; }
+p { margin: 14px 0; }
+a { color: var(--accent); text-underline-offset: 3px; }
+strong { font-weight: 600; }
+code { font-family: var(--mono); font-size: 0.82em; background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
+pre { background: var(--code-bg); border-radius: 10px; padding: 16px 18px; overflow-x: auto; font-size: 14px; line-height: 1.5; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.tw { overflow-x: auto; margin: 18px 0; }
+table { border-collapse: collapse; font-family: var(--sans); font-size: 14.5px; line-height: 1.45; min-width: 60%; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); font-size: 13px; background: var(--code-bg); }
+td code { white-space: nowrap; }
+blockquote { margin: 22px 0; padding: 4px 18px; border-left: 3px solid var(--rule); color: var(--ink-2); }
+blockquote.principle { background: var(--principle-bg); border-left: 4px solid var(--accent); border-radius: 0 10px 10px 0; padding: 14px 20px; color: var(--ink); }
+blockquote.principle p { margin: 0; }
+blockquote.principle strong:first-child { font-family: var(--sans); color: var(--accent); }
+figure.diagram { margin: 26px 0; background: #fff; border: 1px solid var(--rule); border-radius: 12px; padding: 18px; overflow-x: auto; }
+figure.diagram pre.mermaid { background: none; text-align: center; margin: 0; }
+figure.diagram figcaption { font-family: var(--sans); font-size: 13.5px; color: #555c68; margin-top: 10px; }
+.exercises { background: var(--ex-bg); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 26px; margin-top: 40px; max-width: 72ch; }
+.exercises h3 { margin: 4px 0 8px; font-size: 16px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); }
+.exercises li { margin: 8px 0; }
+img { max-width: 100%; }
+@media (max-width: 960px) {
+  .layout { grid-template-columns: 1fr; gap: 0; padding-inline: 16px; }
+  nav.toc { position: static; max-height: none; padding-block: 24px 8px; }
+  .chapter, .cover { padding: 28px 22px; }
+  body { font-size: 17px; }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="layout">
+  <nav class="toc" aria-label="Chapters">
+    <div class="brand"><i></i>Building LANFLIX</div>
+    <div class="sub">System design through a LAN video streaming platform</div>
+    <ol>
+      <li><a href="#top"><span class="n">·</span>Introduction</a></li>
+      <!--TOC-->
+    </ol>
+  </nav>
+  <main>
+    <section class="cover" id="top">
+      <div class="eyebrow">● A textbook</div>
+      <h1>Building LANFLIX: System Design Through a Video Streaming Platform</h1>
+      <!--INTRO-->
+    </section>
+    <!--CHAPTERS-->
+  </main>
+</div>
+
+<script>
+// Highlight the chapter being read in the sidebar.
+const links = [...document.querySelectorAll('nav.toc a')];
+const byId = Object.fromEntries(links.map((a) => [a.getAttribute('href').slice(1), a]));
+const obs = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    links.forEach((a) => a.classList.remove('on'));
+    const a = byId[e.target.id];
+    if (a) a.classList.add('on');
+  }
+}, { rootMargin: '-30% 0px -60% 0px' });
+document.querySelectorAll('section[id]').forEach((s) => obs.observe(s));
+</script>

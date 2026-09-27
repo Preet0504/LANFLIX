@@ -23,6 +23,7 @@ func main() {
 	redisAddr := flag.String("redis", "localhost:6379", "redis address")
 	gop := flag.Int("gop", 2, "segment duration / keyframe interval, seconds")
 	realtime := flag.Bool("realtime", true, "pace encoding at source frame rate (simulates a live broadcast)")
+	chunkMs := flag.Int("chunk-ms", 0, "low-latency mode: publish chunks of this many ms (e.g. 200) instead of one per GOP")
 	flag.Parse()
 
 	if *input == "" {
@@ -46,6 +47,7 @@ func main() {
 		InputPath:  *input,
 		GOPSeconds: *gop,
 		Realtime:   *realtime,
+		ChunkMs:    *chunkMs,
 	})
 	if err != nil {
 		log.Fatal(err)
