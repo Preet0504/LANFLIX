@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Host · LANFLIX</title>
+<link rel="stylesheet" href="assets/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6cff'/%3E%3Cstop offset='1' stop-color='%23ff4d63'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M12 9v14l11-7z' fill='white'/%3E%3C/svg%3E">
+</head>
+<body>
+  <main class="container">
+
+    <!-- Rooms: create one, or reopen one you already have -->
+    <div id="roomsView" class="hidden">
+      <div class="section">
+        <h1 class="page-title">Host</h1>
+        <p class="page-sub">Open one of your rooms to add videos, or create a new one.</p>
+      </div>
+
+      <div class="section panel">
+        <h2 class="panel-title">Create a room</h2>
+        <form class="create-row" id="createForm" autocomplete="off">
+          <input class="input" id="roomName" placeholder="Room name, e.g. Friday Movie Night" maxlength="80" required>
+          <button class="btn btn-primary btn-lg" id="createBtn" type="submit">Create room</button>
+        </form>
+        <div class="field-hint" id="nameHint"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <h2 class="section-title">Your rooms</h2>
+          <span class="section-sub" id="roomCount"></span>
+        </div>
+        <div class="grid" id="roomGrid"></div>
+      </div>
+    </div>
+
+    <!-- One room's dashboard -->
+    <div id="dashView" class="hidden">
+      <div class="breadcrumb"><a href="host.html">Host</a> <span>/</span> <span id="crumbName"></span></div>
+      <div class="section-head" style="align-items:flex-end;flex-wrap:wrap">
+        <div>
+          <h1 class="page-title" id="roomTitle"></h1>
+          <p class="page-sub">Everyone on your network can join from the link below.</p>
+        </div>
+        <a class="btn" id="viewerLink" target="_blank"><span id="eyeIcon"></span>Open as viewer</a>
+      </div>
+
+      <div class="share" style="margin-top:18px">
+        <code id="shareUrl"></code>
+        <button class="btn btn-sm" id="copyBtn"><span id="copyIcon"></span>Copy link</button>
+      </div>
+
+      <div class="stats section" style="margin-top:24px">
+        <div class="stat"><div class="stat-label">Streams</div><div class="stat-value" id="sStreams">–</div></div>
+        <div class="stat"><div class="stat-label">Live now</div><div class="stat-value live" id="sLive">–</div></div>
+        <div class="stat"><div class="stat-label">Watching now</div><div class="stat-value" id="sWatching">–</div></div>
+        <div class="stat"><div class="stat-label">All-time viewers</div><div class="stat-value" id="sAllTime">–</div></div>
+      </div>
+
+      <div class="host-layout section">
+        <div>
+          <div class="section-head"><h2 class="section-title">Streams</h2></div>
+          <div class="grid" id="streamGrid" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr))"></div>
+        </div>
+
+        <aside style="display:flex;flex-direction:column;gap:20px">
+          <div class="panel">
+            <h2 class="panel-title">Go live with a video</h2>
+            <label class="dropzone" id="dropzone">
+              <span id="uploadIcon"></span>
+              <strong>Drop videos here</strong>
+              <span>or click to choose — pick several to stream them all</span>
+              <input type="file" id="fileInput" accept="video/*" multiple hidden>
+            </label>
+            <input class="input" id="titleInput" placeholder="Title (optional, single video)" maxlength="120" style="margin-top:12px">
+            <div class="uploads" id="uploads"></div>
+          </div>
+
+          <div class="panel">
+            <h2 class="panel-title">Room settings</h2>
+            <p style="margin:0 0 12px;color:var(--text-faint);font-size:13.5px">Deleting removes every stream in this room and frees its cache. Available once nothing is live.</p>
+            <button class="btn btn-danger btn-sm" id="deleteRoomBtn"><span id="trashIcon"></span>Delete room</button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+<script type="module">
+import {
+  renderHeader, icon, esc, getJSON, send, toast, copyText, fmtTime, timeAgo,
+  artHTML, statusPill, emptyHTML, watchingNowByMovie, cachedDuration,
+} from './assets/app.js';
+
+renderHeader('host');
+const params = new URLSearchParams(location.search);
+const roomId = params.get('room');
+
+const normalize = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+
+// ---------------- rooms view ----------------
+
+async function showRooms() {
+  document.getElementById('roomsView').classList.remove('hidden');
+  const grid = document.getElementById('roomGrid');
+  const nameInput = document.getElementById('roomName');
+  const hint = document.getElementById('nameHint');
+  const createBtn = document.getElementById('createBtn');
+  let rooms = [];
+
+  async function load() {
+    try { rooms = await getJSON('/api/rooms'); } catch { rooms = []; }
+    document.getElementById('roomCount').textContent = rooms.length ? `${rooms.length} room${rooms.length === 1 ? '' : 's'}` : '';
+    grid.innerHTML = rooms.length ? rooms.map((r) => `
+      <a class="tile" href="host.html?room=${encodeURIComponent(r.id)}">
+        <div class="tile-art">
+          ${artHTML({ posterId: r.poster_movie_id, seed: r.name, label: r.name })}
+          <div class="tile-badges">${r.live_count ? `<span class="pill live"><span class="live-dot"></span>${r.live_count} live</span>` : '<span></span>'}</div>
+        </div>
+        <div class="tile-body">
+          <h3 class="tile-title">${esc(r.name)}</h3>
+          <div class="meta"><span>${r.stream_count} stream${r.stream_count === 1 ? '' : 's'}</span><span>created ${timeAgo(r.created_at_ms)}</span></div>
+          <div class="tile-actions"><span class="btn btn-sm">Manage room</span></div>
+        </div>
+      </a>`).join('') : emptyHTML('No rooms yet', 'Create one above to start streaming.');
+    updateHint();
+  }
+
+  // Tell the host *before* they submit that the name is taken — and that
+  // taking it just reopens their room rather than making a duplicate.
+  function updateHint() {
+    const n = normalize(nameInput.value);
+    const match = n && rooms.find((r) => normalize(r.name) === n);
+    if (match) {
+      hint.className = 'field-hint info';
+      hint.textContent = `"${match.name}" already exists — this will open it so you can add more videos.`;
+      createBtn.textContent = 'Open room';
+    } else {
+      hint.className = 'field-hint';
+      hint.textContent = '';
+      createBtn.textContent = 'Create room';
+    }
+  }
+  nameInput.addEventListener('input', updateHint);
+
+  document.getElementById('createForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) return;
+    createBtn.disabled = true;
+    try {
+      const r = await send('/api/room/create?name=' + encodeURIComponent(name));
+      location.href = `host.html?room=${encodeURIComponent(r.room_id)}${r.created ? '' : '&reopened=1'}`;
+    } catch (err) {
+      toast('Could not create room: ' + err.message, 'err');
+      createBtn.disabled = false;
+    }
+  });
+
+  await load();
+  nameInput.focus();
+}
+
+// ---------------- room dashboard ----------------
+
+async function showDashboard() {
+  document.getElementById('dashView').classList.remove('hidden');
+  document.getElementById('eyeIcon').innerHTML = icon.eye;
+  document.getElementById('copyIcon').innerHTML = icon.copy;
+  document.getElementById('uploadIcon').innerHTML = icon.upload;
+  document.getElementById('trashIcon').innerHTML = icon.trash;
+
+  let room;
+  try {
+    room = await getJSON('/api/room?id=' + encodeURIComponent(roomId));
+  } catch {
+    document.getElementById('dashView').innerHTML = emptyHTML('Room not found', 'It may have been deleted.');
+    return;
+  }
+  document.title = `${room.name} · Host`;
+  document.getElementById('roomTitle').textContent = room.name;
+  document.getElementById('crumbName').textContent = room.name;
+  if (params.get('reopened')) toast(`Opened your existing room "${room.name}"`);
+
+  // Opened as localhost, location.origin would hand out a link that only
+  // works on this machine; the server knows its LAN address instead.
+  let origin = location.origin;
+  if (['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+    try { const info = await getJSON('/api/server-info'); if (info.lan_url) origin = info.lan_url; } catch {}
+  }
+  const watchUrl = `${origin}/watch.html?room=${encodeURIComponent(roomId)}`;
+  document.getElementById('shareUrl').textContent = watchUrl;
+  document.getElementById('viewerLink').href = watchUrl;
+  document.getElementById('copyBtn').onclick = async () => {
+    try { await copyText(watchUrl); toast('Link copied'); } catch { toast('Copy failed — select the link manually', 'err'); }
+  };
+
+  let movies = [];
+  const grid = document.getElementById('streamGrid');
+
+  async function refresh() {
+    let counts = {};
+    try {
+      [movies, counts] = await Promise.all([
+        getJSON('/api/movies?room=' + encodeURIComponent(roomId)),
+        watchingNowByMovie(),
+      ]);
+    } catch { return; }
+
+    const live = movies.filter((m) => m.status !== 'ended').length;
+    const watching = movies.reduce((n, m) => n + (counts[m.id] || 0), 0);
+    const allTime = movies.reduce((n, m) => n + (m.total_viewers_ever || 0), 0);
+    document.getElementById('sStreams').textContent = movies.length;
+    document.getElementById('sLive').textContent = live;
+    document.getElementById('sLive').classList.toggle('on', live > 0);
+    document.getElementById('sWatching').textContent = watching;
+    document.getElementById('sAllTime').textContent = allTime;
+    document.getElementById('deleteRoomBtn').disabled = live > 0;
+
+    grid.innerHTML = movies.length ? movies.map((m) => `
+      <div class="tile" data-play="${esc(m.id)}" tabindex="0">
+        <div class="tile-art">
+          ${artHTML({ posterId: m.id, seed: m.title, label: m.title })}
+          <div class="tile-badges">${statusPill(m.status)}<span class="pill">${fmtTime(cachedDuration(m))}</span></div>
+          <div class="tile-play"><span>${icon.play}</span></div>
+        </div>
+        <div class="tile-body">
+          <h3 class="tile-title">${esc(m.title)}</h3>
+          <div class="meta">
+            <span>${icon.eye}${counts[m.id] || 0} watching</span>
+            <span>${icon.users}${m.total_viewers_ever || 0} all-time</span>
+          </div>
+          ${m.status === 'ended' ? `<div class="tile-actions"><button class="btn btn-sm btn-danger" data-delete="${esc(m.id)}">${icon.trash}Delete</button></div>` : ''}
+        </div>
+      </div>`).join('') : emptyHTML('No streams yet', 'Drop a video on the right and it goes live immediately.');
+  }
+
+  grid.addEventListener('click', async (e) => {
+    const del = e.target.closest('[data-delete]');
+    if (del) {
+      e.stopPropagation();
+      const m = movies.find((x) => x.id === del.dataset.delete);
+      if (!confirm(`Delete "${m ? m.title : 'this stream'}" and free its cache?`)) return;
+      try { await send('/api/movie/delete?id=' + encodeURIComponent(del.dataset.delete), 'DELETE'); toast('Stream deleted'); refresh(); }
+      catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    const tile = e.target.closest('[data-play]');
+    if (tile) window.open(`watch.html?room=${encodeURIComponent(roomId)}&movie=${encodeURIComponent(tile.dataset.play)}`, '_blank');
+  });
+
+  document.getElementById('deleteRoomBtn').onclick = async () => {
+    if (!confirm(`Delete "${room.name}" and every stream in it? This can't be undone.`)) return;
+    try { await send('/api/room/delete?id=' + encodeURIComponent(roomId), 'DELETE'); location.href = 'host.html'; }
+    catch (err) { toast(err.message, 'err'); }
+  };
+
+  // ---- uploads: several files at once, each with its own progress ----
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const titleInput = document.getElementById('titleInput');
+  const list = document.getElementById('uploads');
+  let queue = Promise.resolve();
+
+  function enqueue(files) {
+    const vids = [...files].filter((f) => f.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|m4v)$/i.test(f.name));
+    if (!vids.length) { toast('Those files are not videos', 'err'); return; }
+    const customTitle = vids.length === 1 ? titleInput.value.trim() : '';
+    titleInput.value = '';
+    for (const file of vids) {
+      const title = customTitle || file.name.replace(/\.[^.]+$/, '');
+      const item = document.createElement('div');
+      item.className = 'upload-item';
+      item.innerHTML = `<div class="name"></div><div class="state">Queued</div><div class="bar"><div></div></div>`;
+      item.querySelector('.name').textContent = title;
+      list.prepend(item);
+      queue = queue.then(() => upload(file, title, item));
+    }
+  }
+
+  function upload(file, title, item) {
+    const state = item.querySelector('.state');
+    const bar = item.querySelector('.bar > div');
+    return new Promise((resolve) => {
+      const fd = new FormData();
+      fd.append('title', title);
+      fd.append('video', file);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/host/start?room=' + encodeURIComponent(roomId));
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        bar.style.width = pct + '%';
+        state.textContent = `${pct}% · ${(e.loaded / 1e6).toFixed(1)} / ${(e.total / 1e6).toFixed(1)} MB`;
+      };
+      xhr.onload = () => {
+        if (xhr.status < 300) {
+          bar.style.width = '100%';
+          state.textContent = 'Live';
+          state.className = 'state ok';
+          toast(`"${title}" is live`);
+          refresh();
+          setTimeout(() => item.remove(), 6000);
+        } else {
+          state.textContent = xhr.responseText || 'Upload failed';
+          state.className = 'state err';
+        }
+        resolve();
+      };
+      xhr.onerror = () => { state.textContent = 'Network error'; state.className = 'state err'; resolve(); };
+      state.textContent = 'Uploading…';
+      xhr.send(fd);
+    });
+  }
+
+  fileInput.addEventListener('change', () => { enqueue(fileInput.files); fileInput.value = ''; });
+  ['dragenter', 'dragover'].forEach((t) => dropzone.addEventListener(t, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach((t) => dropzone.addEventListener(t, (e) => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+  dropzone.addEventListener('drop', (e) => enqueue(e.dataTransfer.files));
+
+  await refresh();
+  setInterval(refresh, 2500);
+}
+
+if (roomId) showDashboard(); else showRooms();
+</script>
+</body>
+</html>

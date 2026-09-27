@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>bench: dash</title>
+<script src="vendor/dash.all.min.js"></script></head>
+<body style="margin:0;background:#000">
+<video id="v" muted playsinline style="width:640px"></video>
+<script type="module">
+import { B, q, wall, instrument, markReceipt, protocol } from './common.js';
+
+const video = document.getElementById('v');
+instrument(video);
+
+const player = dashjs.MediaPlayer().create();
+// tuned=1: target one segment (2s) behind live, with catch-up on.
+const tuned = q.get('tuned') === '1';
+player.updateSettings({
+  debug: { logLevel: dashjs.Debug.LOG_LEVEL_WARNING },
+  streaming: tuned ? { delay: { liveDelay: 2.5 }, liveCatchup: { enabled: true } } : {},
+});
+B.config = tuned ? 'liveDelay=2.5s, catch-up on' : 'dash.js defaults';
+
+player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_COMPLETED, (e) => {
+  const m = /chunk-stream0-(\d+)\.m4s/.exec((e.request && e.request.url) || '');
+  if (m) markReceipt(Number(m[1]) - 1); // DASH numbers from 1
+});
+player.on(dashjs.MediaPlayer.events.ERROR, (e) => B.errors.push('dash: ' + JSON.stringify(e.error || e).slice(0, 200)));
+
+B.tStart = wall();
+player.initialize(video, '/out/dash/manifest.mpd', true);
+
+protocol({ seek: (s) => { video.currentTime = s; }, sampleS: Number(q.get('sample') || 15), seeks: Number(q.get('seeks') || 4) });
+</script>
+</body>
+</html>

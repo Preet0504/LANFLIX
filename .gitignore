@@ -1,0 +1,22 @@
+# Uploaded videos (user content) — never commit
+uploads/
+
+# Benchmark working files (regenerable; see README "Reproducing the benchmark")
+bench/out/
+bench/bin/
+bench/media/
+
+# Scratch test output; keep only the small sample clips
+testdata/*
+!testdata/sample.mp4
+!testdata/sample_av.mp4
+
+# Stray ffmpeg output
+/init.mp4
+
+# Build output, logs, local tooling
+*.exe
+*.log
+node_modules/
+__pycache__/
+.claude/

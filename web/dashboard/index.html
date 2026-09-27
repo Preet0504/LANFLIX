@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Viewer dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 20px; }
+  table { border-collapse: collapse; width: 100%; max-width: 720px; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #333; }
+  th { color: #888; font-weight: normal; font-size: 12px; text-transform: uppercase; }
+  #empty { color: #888; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h2>Live viewers</h2>
+  <table id="tbl">
+    <thead><tr><th>Client</th><th>Movie</th><th>Position</th><th>Last update</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" style="display:none">No active viewers.</div>
+
+<script>
+function fmtPos(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/viewers');
+    const viewers = await res.json();
+    const rows = document.getElementById('rows');
+    const ids = Object.keys(viewers);
+    document.getElementById('empty').style.display = ids.length ? 'none' : 'block';
+    rows.innerHTML = ids.map(id => {
+      const v = viewers[id];
+      const agoSec = Math.max(0, Math.floor((Date.now() - v.last_seen_ms) / 1000));
+      return `<tr><td>${id.slice(0, 8)}</td><td>${v.movie_id}</td><td>${fmtPos(v.position_ms)}</td><td>${agoSec}s ago</td></tr>`;
+    }).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

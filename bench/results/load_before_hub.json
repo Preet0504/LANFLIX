@@ -1,0 +1,8 @@
+{"note": "Same load tool and host, per-viewer Redis XREAD (before the fan-out hub). Summary values transcribed from the run log at 02:18-02:20; raw per-segment delays were not kept. Redis showed 81 blocked clients at n=200 (pool cap 80).",
+ "steps": [
+  {"n": 1,   "p50": 4,   "p95": 32,  "server_cpu_pct": 0.1},
+  {"n": 10,  "p50": 2,   "p95": 12,  "server_cpu_pct": 1.9},
+  {"n": 50,  "p50": 10,  "p95": 41,  "server_cpu_pct": 6.1},
+  {"n": 100, "p50": 67,  "p95": 104, "server_cpu_pct": 15.9},
+  {"n": 200, "p50": 159, "p95": 338, "server_cpu_pct": 31.4}
+ ]}

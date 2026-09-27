@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>bench: hls</title>
+<script src="vendor/hls.min.js"></script></head>
+<body style="margin:0;background:#000">
+<video id="v" muted playsinline style="width:640px"></video>
+<script type="module">
+import { B, q, wall, instrument, markReceipt, protocol } from './common.js';
+
+const video = document.getElementById('v');
+instrument(video);
+
+// tuned=1: the most aggressive standard (non-LL) setting — start one
+// segment behind the live edge instead of hls.js's default three.
+const tuned = q.get('tuned') === '1';
+const hls = new Hls(tuned ? { liveSyncDurationCount: 1 } : {});
+B.config = tuned ? 'liveSyncDurationCount=1' : 'hls.js defaults';
+
+hls.on(Hls.Events.FRAG_LOADED, (_e, d) => {
+  if (d.frag.type === 'main' && typeof d.frag.sn === 'number') markReceipt(d.frag.sn);
+});
+hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) B.errors.push(`${d.type}: ${d.details}`); });
+
+B.tStart = wall();
+hls.loadSource('/out/hls/index.m3u8');
+hls.attachMedia(video);
+video.play().catch((e) => B.errors.push('play: ' + e.message));
+
+protocol({ seek: (s) => { video.currentTime = s; }, sampleS: Number(q.get('sample') || 15), seeks: Number(q.get('seeks') || 4) });
+</script>
+</body>
+</html>

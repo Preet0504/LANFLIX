@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>bench: ours</title></head>
+<body style="margin:0;background:#000">
+<video id="v" muted playsinline style="width:640px"></video>
+<script type="module">
+// Runs the production player (web/assets/player.js) unmodified.
+import { B, q, wall, timeline, instrument, markReceipt, protocol } from './common.js';
+import { StreamPlayer } from '/assets/player.js';
+
+const video = document.getElementById('v');
+instrument(video);
+const tl = await timeline();
+const edge = Math.max(...Object.keys(tl.ours).map(Number));
+
+const player = new StreamPlayer(video, {
+  host: q.get('host') || 'localhost:8090',
+  // Each media chunk starts with moof → mfhd; its sequence_number (offset
+  // 20, 1-based) identifies the segment. Chunk 0 on a socket is the init.
+  onChunk: (buf) => {
+    if (buf.byteLength < 24) return;
+    const dv = new DataView(buf);
+    if (String.fromCharCode(dv.getUint8(4), dv.getUint8(5), dv.getUint8(6), dv.getUint8(7)) !== 'moof') return;
+    markReceipt(dv.getUint32(20) - 1);
+  },
+});
+player.movieId = tl.movie_id;
+player.liveEdgeMs = edge * tl.gop_ms;
+B.joinSegment = edge;
+
+// Keep the clamp for seeks current as the live edge advances.
+setInterval(async () => {
+  const t = await timeline();
+  player.liveEdgeMs = Math.max(...Object.keys(t.ours).map(Number)) * t.gop_ms;
+}, 1000);
+
+B.tStart = wall();
+player.connect(edge * tl.gop_ms); // join at the live edge
+video.play().catch((e) => B.errors.push('play: ' + e.message));
+
+protocol({ seek: (s) => player.seekTo(s * 1000), sampleS: Number(q.get('sample') || 15), seeks: Number(q.get('seeks') || 4) });
+</script>
+</body>
+</html>

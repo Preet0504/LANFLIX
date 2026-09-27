@@ -1,0 +1,567 @@
+<title>LANFLIX Latency Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+:root {
+  --paper: #fbfbf9;
+  --surface: #ffffff;
+  --ink: #16181d;
+  --ink-2: #4c515c;
+  --ink-3: #7d828c;
+  --rule: #e4e3dd;
+  --rule-2: #cfcdc4;
+  --code: #f2f1ec;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s7: #4a3aa7;
+  --good: #1f7a3a; --bad: #b3342f; --part: #8a6100;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "Arial Narrow", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #111317; --surface: #171a1f; --ink: #eef0f3; --ink-2: #b9bec8; --ink-3: #868b95;
+    --rule: #262a31; --rule-2: #353a43; --code: #1d2026;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s7: #9085e9;
+    --good: #4cc47a; --bad: #ef6d66; --part: #e0b04a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #111317; --surface: #171a1f; --ink: #eef0f3; --ink-2: #b9bec8; --ink-3: #868b95;
+  --rule: #262a31; --rule-2: #353a43; --code: #1d2026;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s7: #9085e9;
+  --good: #4cc47a; --bad: #ef6d66; --part: #e0b04a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.6; margin: 0; }
+.page { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 56px 96px; }
+.col { max-width: 700px; }
+h1, h2, h3 { font-family: var(--cond); text-wrap: balance; letter-spacing: -0.01em; }
+h1 { font-size: clamp(32px, 5vw, 46px); line-height: 1.08; margin: 10px 0 0; font-weight: 700; }
+h2 { font-size: 25px; margin: 64px 0 10px; font-weight: 600; display: flex; gap: 12px; align-items: baseline; }
+h2 .num, h3 .num { font-family: var(--mono); font-weight: 500; font-size: .7em; color: var(--ink-3); letter-spacing: 0; }
+h3 { font-size: 19px; margin: 40px 0 6px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+p { margin: 12px 0; }
+.eyebrow { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); letter-spacing: .06em; text-transform: uppercase; }
+.lede { font-size: 18px; color: var(--ink-2); margin-top: 18px; }
+.byline { font-size: 14px; color: var(--ink-3); margin-top: 14px; }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.55; }
+a { color: var(--s1); }
+strong { font-weight: 600; }
+.b { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* key results */
+.keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0; margin-top: 36px; border-top: 2px solid var(--ink); border-bottom: 1px solid var(--rule-2); }
+.key { padding: 18px 18px 18px 0; border-right: 1px solid var(--rule); }
+.key:last-child { border-right: 0; }
+.key + .key { padding-left: 18px; }
+.key .v { font-family: var(--cond); font-size: 38px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.key .v small { font-size: 18px; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+.key .l { font-size: 13.5px; color: var(--ink-2); margin-top: 8px; line-height: 1.45; }
+@media (max-width: 640px) { .key { border-right: 0; border-bottom: 1px solid var(--rule); padding-left: 0 !important; } }
+
+/* figures */
+figure { margin: 26px 0 8px; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 10px; position: relative; }
+.fig svg { display: block; width: 100%; height: auto; overflow: visible; }
+figcaption { font-size: 14px; color: var(--ink-2); margin-top: 10px; max-width: 760px; }
+figcaption b { color: var(--ink); font-family: var(--cond); font-weight: 600; font-size: 15px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); margin: 0 0 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend i.dot { width: 9px; height: 9px; border-radius: 50%; }
+details.data { margin-top: 8px; }
+details.data summary { font-size: 13px; color: var(--ink-3); cursor: pointer; }
+details.data summary:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 8px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.45; padding: 7px 9px; border-radius: 6px; white-space: nowrap; z-index: 5; opacity: 0; transition: opacity .1s; font-variant-numeric: tabular-nums; }
+.tip.on { opacity: 1; }
+svg text { font-family: var(--sans); }
+.ax { fill: var(--ink-3); font-size: 11.5px; }
+.lab { fill: var(--ink-2); font-size: 12.5px; }
+.lab-strong { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
+.grid { stroke: var(--rule); stroke-width: 1; }
+.base { stroke: var(--rule-2); stroke-width: 1; }
+
+/* comparison matrix */
+.matrix th, .matrix td { padding: 9px 10px; }
+.matrix td:first-child { font-weight: 500; }
+.matrix .sub { display: block; color: var(--ink-3); font-size: 12px; font-weight: 400; margin-top: 2px; }
+.mk { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+.mk.y { color: var(--good); } .mk.n { color: var(--bad); } .mk.p { color: var(--part); }
+.mk svg { width: 14px; height: 14px; }
+.matrix col.ours { background: color-mix(in srgb, var(--s1) 7%, transparent); }
+
+.callout { border-left: 3px solid var(--rule-2); padding: 4px 0 4px 16px; color: var(--ink-2); margin: 20px 0; }
+.found { border: 1px solid var(--rule); border-radius: 10px; padding: 4px 18px; background: var(--surface); }
+.found li { margin: 10px 0; }
+ul { padding-left: 20px; }
+@media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+</style>
+
+<div class="page">
+  <header class="col">
+    <div class="eyebrow">Benchmark report · LAN video delivery</div>
+    <h1>Push beats poll: Redis Streams + WebSocket vs HLS and DASH on a local network</h1>
+    <p class="lede">One encoder, three delivery systems, identical bytes. We measured how fast each gets a viewer to the first frame, how close to real time they play, how quickly each new segment reaches the viewer, and what happens under load and packet loss.</p>
+    <p class="byline" id="byline"></p>
+  </header>
+
+  <section class="keys" id="keys"></section>
+
+  <section class="col">
+    <h2><span class="num">1</span>Summary</h2>
+    <p>On a LAN, the bottleneck in live streaming is not bandwidth, it's <em>discovery</em>: how a player finds out a new segment exists. HLS and DASH players poll a playlist or compute availability from a clock; our system (LANFLIX) pushes each segment down an open WebSocket the moment Redis has it.</p>
+    <p>That shows up exactly where you'd expect. New segments reach our viewers a median of <span class="b" data-v="ours.delivery.median|ms"></span> after they exist, versus <span class="b" data-v="hls.delivery.median|ms"></span> for HLS and <span class="b" data-v="dash.delivery.median|ms"></span> for DASH. Our first frame appears in <span class="b" data-v="ours.ttff.median|ms"></span> (HLS <span class="b" data-v="hls.ttff.median|ms"></span>, DASH <span class="b" data-v="dash.ttff.median|ms"></span>), and viewers play <span class="b" data-v="ours.latency.median|s"></span> behind real time (HLS <span class="b" data-v="hls.latency.median|s"></span> with defaults, <span class="b" data-v="hls-tuned.latency.median|s"></span> tuned).</p>
+    <p>It is not a clean sweep, and this report says so. <strong>Seeking is where we lose</strong>: <span class="b" data-v="ours.seek.median|ms"></span> median against <span class="b" data-v="hls.seek.median|ms"></span> for HLS. Both are imperceptible, but the cause is a real design flaw: after a seek we push everything up to the live edge, which also wastes bandwidth. HLS and DASH also win on everything the open internet needs: adaptive bitrate, CDN caching, native iPhone playback. And the benchmark exposed three bugs in our server, fixed before these numbers were taken (<a href="#found">§8</a>).</p>
+  </section>
+
+  <section>
+    <div class="col">
+      <h2><span class="num">2</span>Setup</h2>
+      <p>A single ffmpeg process encodes a looping 720p30 test source in real time (H.264 High, 2&nbsp;s GOP with keyframes only on segment boundaries, AAC 128&nbsp;kb/s) and <strong>tees the encoded packets to all three systems at once</strong>. Every system receives bit-identical frames at the same instant, so every difference measured below is delivery, not encoding.</p>
+    </div>
+    <figure>
+      <pre class="mermaid">
+flowchart LR
+  SRC["Source clip<br/>(looped, real time)"] --> ENC["ffmpeg<br/>one x264 + AAC encoder"]
+  ENC -- "fMP4 on stdout" --> DMX["Production demuxer"] --> RS[("Redis Streams")] --> HUB["Server fan-out hub"] -- "WebSocket push" --> V1["Ours · production player"]
+  ENC -- "HTTP PUT" --> H["HLS origin<br/>EVENT playlist"] -- "poll + GET" --> V2["hls.js 1.7.3"]
+  ENC -- "HTTP PUT" --> D["DASH origin<br/>dynamic MPD"] -- "GET by template" --> V3["dash.js 5.2.1"]
+      </pre>
+      <figcaption><b>Figure 1.</b> Test harness. HLS and DASH are ingested over HTTP into an in-memory origin, as production origins ingest; our side runs the production demuxer, Redis, server and player code unmodified.</figcaption>
+    </figure>
+    <div class="col">
+      <p>Five configurations were measured. HLS and DASH each ran twice: with the players' defaults, and <strong>tuned</strong> to the most aggressive standard (non-low-latency) setting, so our results are compared against the best these protocols can do without LL-HLS/LL-DASH.</p>
+      <div class="tw"><table id="configTable"></table></div>
+      <p>Each configuration ran <span class="b" data-v="meta.trials"></span> trials in headless Edge (Chromium), interleaved round-robin so drift in machine load can't favor any one system, each in a fresh browser profile. A trial joins at the live edge, plays 15&nbsp;s, then seeks to four pseudo-random points in the stream history (the same points for every system in a given trial). Frame timing comes from <code>requestVideoFrameCallback</code>, which reports when a frame was actually presented on screen, not merely decoded. Client and origin share one machine and one clock, so per-segment delays are measured directly rather than estimated.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="col"><h2><span class="num">3</span>Latency</h2></div>
+
+    <div class="col"><h3><span class="num">3.1</span>Time to first frame</h3>
+      <p>From telling the player to start at the live edge until its first frame is on screen. Ours needs one round trip: the socket opens and the newest segment arrives with the init segment. hls.js fetches a playlist, then an init segment, then media; dash.js fetches and parses an MPD first.</p></div>
+    <figure><div class="fig" id="fTtff"></div>
+      <figcaption><b>Figure 2.</b> Time to first frame, one dot per trial; the vertical tick is the median. Lower is better.</figcaption></figure>
+
+    <div class="col"><h3><span class="num">3.2</span>Delay behind real time</h3>
+      <p>Glass-to-glass: for every frame presented during steady playback, the time since the encoder produced it. HLS's default holds three segments back (about 6&nbsp;s) for safety; its tuned setting and ours both start one segment behind. What's left over after that is delivery.</p></div>
+    <figure><div class="fig" id="fLatency"></div>
+      <figcaption><b>Figure 3.</b> Median glass-to-glass delay per trial. Lower is better. dash.js also stalled in every run: 1–4 times per 15&nbsp;s window by default, 4–5 times tuned. Ours and default HLS never stalled; tuned HLS, holding only one segment of buffer, stalled 4 times in 1 of 10 runs. Includes the unavoidable one-segment (2&nbsp;s) hold every non-low-latency system needs; the encoder's startup time (<span data-v="meta.encoder_startup_ms|ms"></span>) is calibrated out for all systems equally.</figcaption></figure>
+
+    <div class="col"><h3><span class="num">3.3</span>New-segment delivery: push versus poll</h3>
+      <p>The purest measure of the architecture: once a new segment exists at the origin, how long until the viewer has its bytes? Ours is pushed the moment Redis stores it. An HLS player only notices after its next playlist refresh; a DASH player requests on a schedule computed from the manifest's clock.</p></div>
+    <figure><div class="fig" id="fCdf"></div>
+      <figcaption><b>Figure 4.</b> Cumulative distribution of per-segment delivery delay across all trials: the curve reaching 100% soonest is fastest. Log scale: ours is measured in milliseconds, polling in hundreds of them. Hover to read every system's delay at a given percentile.</figcaption></figure>
+
+    <div class="col"><h3><span class="num">3.4</span>Seeking inside the stream history</h3>
+      <p>The one latency measure we lose. All three are well under the ~100&nbsp;ms where a seek starts to feel slow, but ours is measurably slower, and it gets slower with each successive seek in a session (median <span class="b" id="seekByPos"></span> for seeks 1–4, while HLS stays flat). Two causes, both ours to fix: the server reads a page of four segments (~2.4&nbsp;MB) from Redis before sending the first, and, because a seek pushes <em>everything</em> up to the live edge (§4.2), the next seek's segment queues behind megabytes still in flight. An earlier version was worse still: it read the entire history before sending anything (<a href="#found">§8</a>).</p></div>
+    <figure><div class="fig" id="fSeek"></div>
+      <figcaption><b>Figure 5.</b> Seek latency, issue to first frame near the target presented, one dot per seek. Lower is better. Very low values mean the target was already buffered.</figcaption></figure>
+  </section>
+
+  <section>
+    <div class="col"><h2><span class="num">4</span>Cost</h2>
+      <h3><span class="num">4.1</span>Requests to the origin</h3>
+      <p>Polling has a price paid by the server, per viewer, forever: every HLS viewer re-fetches the playlist every couple of seconds even when nothing changed. Ours opens one socket per session; seeks and position reports ride on it.</p></div>
+    <figure><div class="fig" id="fReq"></div>
+      <figcaption><b>Figure 6.</b> HTTP requests per viewer per minute of watching (median of trials), counted at the origin. Ours: the single WebSocket upgrade.</figcaption></figure>
+
+    <div class="col"><h3><span class="num">4.2</span>Segments fetched per session</h3>
+      <p>The flip side, and a real weakness: after a seek, our server pushes <em>every</em> segment from the seek point up to the live edge, while hls.js stops at a 30-second buffer. A session that seeks far back pulls far more data than it will watch. The fix is flow control (the client asks for the next window as it plays), not yet built.</p></div>
+    <figure><div class="fig" id="fSegs"></div>
+      <figcaption><b>Figure 7.</b> Segments (2&nbsp;s each) downloaded per 15&nbsp;s trial with four seeks, median. Lower is better.</figcaption></figure>
+  </section>
+
+  <section>
+    <div class="col"><h2><span class="num">5</span>Scaling to many viewers</h2>
+      <p>N concurrent viewers join our origin at the live edge; for each new segment we record when every viewer received it, and SHA-256-check every byte against what was published. The load generator and the server share one 8-core machine and loopback, so this measures our software, not a network.</p>
+      <p>The first run found a real flaw. Each viewer held its own blocking Redis read, each tying up a connection from a pool of 80; past 80 viewers the rest queued, and Redis sat at 81 blocked clients. We replaced it with a <strong>fan-out hub</strong>: one Redis tail per movie, broadcast in-process to every viewer. Redis work now scales with the number of streams, not viewers.</p></div>
+    <figure><div class="fig" id="fScale"></div>
+      <figcaption><b>Figure 8.</b> Median delay from publish to receipt versus concurrent viewers, before and after the fan-out hub. At 200 viewers the server pushes <span data-v="load.last.aggregate_mbps|mbps"></span>, more than most Wi-Fi networks can carry; past that point, the LAN is the limit, not the server.</figcaption></figure>
+    <figure><div class="fig" id="fCpu"></div>
+      <figcaption><b>Figure 9.</b> Server CPU (percent of one core) versus concurrent viewers.</figcaption></figure>
+    <div class="col"><p><strong>Integrity:</strong> across every load step, <span class="b" data-v="load.delivered|int"></span> of <span class="b" data-v="load.expected|int"></span> expected segment deliveries arrived, with <span class="b" data-v="load.mismatches|int"></span> hash mismatches.</p></div>
+  </section>
+
+  <section>
+    <div class="col"><h2><span class="num">6</span>Packet loss</h2>
+      <p>This project began as a comparison with raw UDP streaming, the multicast-style approach that sends each packet once to everyone. We streamed the same clip as MPEG-TS over UDP through a receiver that drops a controlled share of datagrams, then counted what no longer decodes.</p>
+      <p class="callout">Read this section carefully. It does <strong>not</strong> show ours beating HLS or DASH on loss. All three run over TCP, which retransmits: on a lossy link their bytes still arrive intact, just later. The comparison here is TCP delivery versus UDP delivery, and we did not inject loss into the TCP systems (the test host has no kernel-level loss emulator). What we did verify is that our delivery is byte-exact: every segment in the load test matched its published SHA-256.</p></div>
+    <figure><div class="fig" id="fUdp"></div>
+      <figcaption><b>Figure 10.</b> Video frames that fail to decode entirely versus datagram loss rate. Most damage is worse than this curve shows: corrupted-but-decodable frames smear artifacts until the next keyframe (see decoder errors in the data table), UDP / MPEG-TS, <span data-v="udp.secs"></span>-second clip. UDP also has no way to recover the past: a viewer who joins late simply never receives what was sent before.</figcaption></figure>
+  </section>
+
+  <section>
+    <div class="col"><h2><span class="num">7</span>Where each system wins</h2>
+      <p>Measured results from this study, plus capabilities that follow from each protocol's design. "Partial" means possible with extra work or a newer protocol variant not tested here.</p></div>
+    <div class="tw"><table class="matrix" id="matrix"></table></div>
+  </section>
+
+  <section class="col" id="found">
+    <h2><span class="num">8</span>What the benchmark fixed</h2>
+    <p>Running the benchmark before writing it up changed the product. Each of these was found by a measurement, fixed, and re-measured; the numbers above are from the fixed code.</p>
+    <ul class="found">
+      <li><strong>Seek read the whole history first.</strong> A seek loaded every segment from the target to the live edge out of Redis before sending byte one (about 24&nbsp;MB for 40 segments). Now paged and sent as it is read. That removed the worst case, but seeks are still slower than HLS for the reasons in §3.4.</li>
+      <li><strong>Redis connections per viewer.</strong> Every viewer held a blocking read; the connection pool capped at 80. Replaced with a per-movie fan-out hub: Redis blocked connections at 200 viewers went from 81 to 2 (one per movie, plus the benchmark origin's own), and server CPU from 31% to 12% of a core.</li>
+      <li><strong>Hardcoded codec string.</strong> The player declared H.264 level 3.0 for every stream; 720p is 3.1 and 1080p is 4.x, and Chrome merely tolerated it. It now reads the real profile and level, and whether audio exists, from the stream's init segment.</li>
+    </ul>
+    <p>Earlier in the same session, testing with real 8–10 minute uploads also caught encoding freezing after about 8 minutes (ffmpeg's progress output silently filled a pipe), fixed with a regression test that reproduces it.</p>
+  </section>
+
+  <section class="col">
+    <h2><span class="num">9</span>Limitations</h2>
+    <ul>
+      <li><strong>One machine, loopback.</strong> Client, server and origin share a host, so absolute times are optimistic for a real Wi-Fi network (which adds a few ms and jitter to every system alike). Relative ordering is what these results support.</li>
+      <li><strong>Not tested against low-latency variants.</strong> LL-HLS (blocking playlist reload, partial segments) and LL-DASH (chunked CMAF) exist to attack exactly the polling delay measured in §3.3, and would narrow the gap considerably. We compared against standard HLS/DASH, tuned.</li>
+      <li><strong>No loss on TCP.</strong> See §6: loss was only applied to UDP.</li>
+      <li><strong>Synthetic source.</strong> A test pattern, 720p30, one bitrate. No adaptive bitrate was involved on any side.</li>
+      <li><strong>Our origin is one process.</strong> No clustering or CDN; it serves a LAN, which is what it was built for.</li>
+    </ul>
+  </section>
+
+  <section class="col">
+    <h2><span class="num">10</span>Reproducing</h2>
+    <p>With Redis, Kafka and the server running (see the project README):</p>
+<pre>go build -o bench/bin/source.exe ./bench/source
+go build -o bench/bin/load.exe  ./bench/load
+go build -o bench/bin/udp.exe   ./bench/udp
+bench/bin/source.exe -duration 5400 &amp;          # one encoder → all three systems
+node bench/run.js --trials 10 --sample 15 --seeks 4
+bench/bin/load.exe -pid &lt;server pid&gt; -n 1,10,25,50,100,200
+bench/bin/udp.exe
+python bench/analyze.py                        # → bench/results/summary.json</pre>
+  </section>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+
+/* ---------- data access & formatting ---------- */
+const C = Object.fromEntries(DATA.configs.map((c) => [c.key, c]));
+const ORDER = ['ours', 'hls', 'hls-tuned', 'dash', 'dash-tuned'];
+const COLOR = { ours: 'var(--s1)', hls: 'var(--s2)', 'hls-tuned': 'var(--s3)', dash: 'var(--s4)', 'dash-tuned': 'var(--s5)', udp: 'var(--s7)', before: 'var(--s2)', after: 'var(--s1)' };
+const SHORT = { ours: 'Ours', hls: 'HLS', 'hls-tuned': 'HLS tuned', dash: 'DASH', 'dash-tuned': 'DASH tuned' };
+const med = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const fmt = {
+  ms: (v) => v >= 1000 ? (v / 1000).toFixed(2) + ' s' : Math.round(v) + ' ms',
+  s: (v) => (v / 1000).toFixed(1) + ' s',
+  int: (v) => Math.round(v).toLocaleString('en-US'),
+  pct: (v) => (v < 10 ? v.toFixed(1) : Math.round(v)) + '%',
+  mbps: (v) => Math.round(v) + ' Mb/s',
+  x: (v) => v.toFixed(1) + '×',
+  raw: (v) => String(v),
+};
+
+const LOAD = DATA.load || [];
+const loadTotals = LOAD.reduce((a, s) => ({ d: a.d + (s.delivered || 0), e: a.e + s.expected, m: a.m + s.hash_mismatches }), { d: 0, e: 0, m: 0 });
+const derived = {
+  'load.last.aggregate_mbps': LOAD.length ? LOAD[LOAD.length - 1].aggregate_mbps : null,
+  'load.delivered': loadTotals.d, 'load.expected': loadTotals.e, 'load.mismatches': loadTotals.m,
+  'udp.secs': 60,
+  'meta.trials': DATA.meta.trials,
+  'meta.encoder_startup_ms': DATA.meta.encoder_startup_ms,
+};
+function resolve(path) {
+  if (path in derived) return derived[path];
+  const [key, ...rest] = path.split('.');
+  let v = C[key];
+  for (const r of rest) v = v == null ? v : v[r];
+  return v;
+}
+document.querySelectorAll('[data-v]').forEach((el) => {
+  const [path, f = 'raw'] = el.dataset.v.split('|');
+  const v = resolve(path);
+  el.textContent = v == null ? '—' : fmt[f](v);
+});
+
+/* ---------- svg helpers ---------- */
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function niceTicks(lo, hi, n = 5) {
+  const span = hi - lo, step0 = span / n, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= n) || 10 * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function tipFor(fig) {
+  const t = document.createElement('div');
+  t.className = 'tip';
+  fig.appendChild(t);
+  return {
+    show(html, x, y) {
+      t.innerHTML = html; t.classList.add('on');
+      const fw = fig.clientWidth, tw = t.offsetWidth;
+      t.style.left = Math.max(4, Math.min(fw - tw - 4, x + 12)) + 'px';
+      t.style.top = Math.max(4, y - t.offsetHeight - 10) + 'px';
+    },
+    hide() { t.classList.remove('on'); },
+  };
+}
+function svgPoint(svg, evt) {
+  const r = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
+  return { x: (evt.clientX - r.left) * vb.width / r.width, y: (evt.clientY - r.top) * vb.height / r.height, px: evt.clientX - r.left, py: evt.clientY - r.top };
+}
+function legendHTML(items, kind = 'line') {
+  return '<div class="legend">' + items.map(([k, label]) => `<span><i class="${kind === 'dot' ? 'dot' : ''}" style="background:${COLOR[k]}"></i>${label}</span>`).join('') + '</div>';
+}
+function tableHTML(head, rows) {
+  return `<details class="data"><summary>Show data</summary><div class="tw"><table><thead><tr>${head.map((h, i) => `<th class="${i ? 'n' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${
+    rows.map((r) => `<tr>${r.map((c, i) => `<td class="${i ? 'n' : ''}">${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+}
+
+/* ---------- strip plot: one row per config ---------- */
+function strip(id, field, { unit = fmt.ms, log = false } = {}) {
+  const fig = document.getElementById(id);
+  const rows = ORDER.filter((k) => C[k] && C[k][field] && C[k][field].length).map((k) => ({ k, vals: C[k][field] }));
+  const all = rows.flatMap((r) => r.vals);
+  const W = 880, rowH = 38, L = 118, R = 70, T = 8, H = T + rows.length * rowH + 30;
+  let lo = 0, hi = Math.max(...all) * 1.05;
+  const tf = log ? (v) => Math.log10(Math.max(v, 1)) : (v) => v;
+  if (log) { lo = 0; hi = Math.log10(Math.max(...all) * 1.3); }
+  const x = (v) => L + (tf(v) - lo) / (hi - lo) * (W - L - R);
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const ticks = log ? [1, 10, 100, 1000, 10000].filter((t) => Math.log10(t) <= hi) : niceTicks(0, hi, 6);
+  ticks.forEach((t) => {
+    el('line', { x1: x(t), x2: x(t), y1: T, y2: H - 26, class: 'grid' }, svg);
+    el('text', { x: x(t), y: H - 10, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = unit(t);
+  });
+  const tip = tipFor(fig);
+  rows.forEach((r, i) => {
+    const cy = T + i * rowH + rowH / 2;
+    el('text', { x: L - 12, y: cy + 4, 'text-anchor': 'end', class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = SHORT[r.k];
+    el('line', { x1: L, x2: W - R, y1: cy, y2: cy, class: 'base', 'stroke-opacity': .5 }, svg);
+    r.vals.forEach((v, j) => {
+      const jit = ((j * 7919) % 13 - 6) * 1.3;
+      const c = el('circle', { cx: x(v), cy: cy + jit, r: 4.5, fill: COLOR[r.k], 'fill-opacity': .75, stroke: 'var(--surface)', 'stroke-width': 1.5 }, svg);
+      const hit = el('circle', { cx: x(v), cy: cy + jit, r: 11, fill: 'transparent' }, svg);
+      hit.addEventListener('pointerenter', (e) => { const p = svgPoint(svg, e); tip.show(`<b>${SHORT[r.k]}</b><br>${unit(v)}`, p.px, p.py); c.setAttribute('r', 6); });
+      hit.addEventListener('pointerleave', () => { tip.hide(); c.setAttribute('r', 4.5); });
+    });
+    const m = med(r.vals);
+    el('line', { x1: x(m), x2: x(m), y1: cy - 13, y2: cy + 13, stroke: 'var(--ink)', 'stroke-width': 2, 'stroke-linecap': 'round' }, svg);
+    el('text', { x: W - R + 10, y: cy + 4, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = unit(m);
+  });
+  el('text', { x: W - R + 10, y: T - 0 + 0, class: 'ax' }, svg);
+  fig.appendChild(svg);
+  fig.insertAdjacentHTML('beforeend', tableHTML(['Configuration', 'n', 'Median', 'p10', 'p90', 'Min', 'Max'],
+    rows.map((r) => { const s = [...r.vals].sort((a, b) => a - b), q = (p) => s[Math.round((s.length - 1) * p)];
+      return [SHORT[r.k], s.length, unit(med(s)), unit(q(.1)), unit(q(.9)), unit(s[0]), unit(s[s.length - 1])]; })));
+}
+
+/* ---------- CDF (log x) ---------- */
+function cdf(id) {
+  const fig = document.getElementById(id);
+  const series = ORDER.filter((k) => C[k] && C[k].delivery_ms.length).map((k) => ({ k, s: [...C[k].delivery_ms].map((v) => Math.max(v, 1)).sort((a, b) => a - b) }));
+  fig.insertAdjacentHTML('afterbegin', legendHTML(series.map((r) => [r.k, SHORT[r.k]])));
+  const W = 880, H = 330, L = 52, R = 150, T = 12, B = 40;
+  const maxV = Math.max(...series.flatMap((r) => r.s));
+  const lx = (v) => Math.log10(v), lo = 0, hi = Math.log10(maxV * 1.2);
+  const x = (v) => L + (lx(v) - lo) / (hi - lo) * (W - L - R);
+  const y = (p) => T + (1 - p) * (H - T - B);
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  [0, .25, .5, .75, 1].forEach((p) => {
+    el('line', { x1: L, x2: W - R, y1: y(p), y2: y(p), class: 'grid' }, svg);
+    el('text', { x: L - 8, y: y(p) + 4, 'text-anchor': 'end', class: 'ax' }, svg).textContent = Math.round(p * 100) + '%';
+  });
+  [1, 3, 10, 30, 100, 300, 1000, 3000, 10000].filter((t) => lx(t) <= hi).forEach((t) => {
+    el('line', { x1: x(t), x2: x(t), y1: T, y2: H - B, class: 'grid' }, svg);
+    el('text', { x: x(t), y: H - B + 18, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = fmt.ms(t);
+  });
+  el('line', { x1: L, x2: W - R, y1: y(0), y2: y(0), class: 'base' }, svg);
+  el('text', { x: (L + W - R) / 2, y: H - 4, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = 'delay from segment available → viewer has it (log scale)';
+  series.forEach((r) => {
+    let d = `M${x(r.s[0])},${y(0)}`;
+    r.s.forEach((v, i) => { d += ` L${x(v)},${y(i / r.s.length)} L${x(v)},${y((i + 1) / r.s.length)}`; });
+    el('path', { d, fill: 'none', stroke: COLOR[r.k], 'stroke-width': r.k === 'ours' ? 2.5 : 2, 'stroke-linejoin': 'round' }, svg);
+    const m = med(r.s);
+    el('text', { x: W - R + 8, y: 0, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg);
+    r.medianX = x(m);
+  });
+  // Median markers on the curves; labels stacked in the right gutter,
+  // ordered by median, so bunched curves never collide.
+  el('text', { x: W - R + 10, y: y(.5) - 44, class: 'ax' }, svg).textContent = 'median';
+  series.map((r) => r).sort((a, b) => med(a.s) - med(b.s)).forEach((r, i) => {
+    el('circle', { cx: r.medianX, cy: y(.5), r: 4, fill: COLOR[r.k], stroke: 'var(--surface)', 'stroke-width': 2 }, svg);
+    const ly = y(.5) - 26 + i * 17;
+    el('circle', { cx: W - R + 14, cy: ly - 4, r: 4, fill: COLOR[r.k] }, svg);
+    el('text', { x: W - R + 23, y: ly, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = `${SHORT[r.k]} ${fmt.ms(med(r.s))}`;
+  });
+  const tip = tipFor(fig);
+  const guide = el('line', { y1: T, y2: H - B, stroke: 'var(--ink-3)', 'stroke-width': 1, opacity: 0 }, svg);
+  const hit = el('rect', { x: L, y: T, width: W - L - R, height: H - T - B, fill: 'transparent' }, svg);
+  hit.addEventListener('pointermove', (e) => {
+    const p = svgPoint(svg, e);
+    const pr = 1 - (p.y - T) / (H - T - B);
+    if (pr < 0 || pr > 1) return;
+    guide.setAttribute('x1', L); guide.setAttribute('x2', W - R); guide.setAttribute('y1', y(pr)); guide.setAttribute('y2', y(pr)); guide.setAttribute('opacity', .6);
+    const rows = series.map((r) => `<span style="color:${COLOR[r.k]}">●</span> ${SHORT[r.k]}: ${fmt.ms(r.s[Math.min(r.s.length - 1, Math.floor(pr * r.s.length))])}`);
+    tip.show(`<b>${Math.round(pr * 100)}th percentile</b><br>${rows.join('<br>')}`, p.px, p.py);
+  });
+  hit.addEventListener('pointerleave', () => { tip.hide(); guide.setAttribute('opacity', 0); });
+  fig.appendChild(svg);
+  fig.insertAdjacentHTML('beforeend', tableHTML(['Configuration', 'Segments', 'Median', 'p90', 'p95', 'Max'],
+    series.map((r) => { const q = (p) => r.s[Math.round((r.s.length - 1) * p)]; return [SHORT[r.k], r.s.length, fmt.ms(med(r.s)), fmt.ms(q(.9)), fmt.ms(q(.95)), fmt.ms(r.s[r.s.length - 1])]; })));
+}
+
+/* ---------- horizontal bars ---------- */
+function bars(id, rows, unit) {
+  const fig = document.getElementById(id);
+  const W = 880, rowH = 34, L = 118, R = 90, T = 6, H = T + rows.length * rowH + 4;
+  const hi = Math.max(...rows.map((r) => r.v)) * 1.02 || 1;
+  const x = (v) => L + v / hi * (W - L - R);
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const tip = tipFor(fig);
+  rows.forEach((r, i) => {
+    const y0 = T + i * rowH + 7, bh = rowH - 14;
+    el('text', { x: L - 12, y: y0 + bh / 2 + 4, 'text-anchor': 'end', class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = SHORT[r.k] || r.label;
+    const w = Math.max(x(r.v) - L, 2);
+    el('path', { d: `M${L},${y0} h${Math.max(w - 4, 0)} a4,4 0 0 1 4,4 v${bh - 8} a4,4 0 0 1 -4,4 h${-Math.max(w - 4, 0)} z`, fill: COLOR[r.k] }, svg);
+    el('text', { x: L + w + 8, y: y0 + bh / 2 + 4, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = unit(r.v);
+    const hit = el('rect', { x: L, y: y0 - 4, width: W - L - R, height: bh + 8, fill: 'transparent' }, svg);
+    hit.addEventListener('pointermove', (e) => { const p = svgPoint(svg, e); tip.show(`<b>${SHORT[r.k]}</b><br>${unit(r.v)}${r.note ? '<br>' + r.note : ''}`, p.px, p.py); });
+    hit.addEventListener('pointerleave', () => tip.hide());
+  });
+  el('line', { x1: L, x2: L, y1: T, y2: H - 4, class: 'base' }, svg);
+  fig.appendChild(svg);
+  fig.insertAdjacentHTML('beforeend', tableHTML(['Configuration', 'Value'], rows.map((r) => [SHORT[r.k] || r.label, unit(r.v)])));
+}
+
+/* ---------- line chart over numeric x ---------- */
+function lines(id, series, { xLabel, yUnit, xTicks, yMax }) {
+  const fig = document.getElementById(id);
+  fig.insertAdjacentHTML('afterbegin', legendHTML(series.map((s) => [s.k, s.label])));
+  const W = 880, H = 300, L = 60, R = 120, T = 14, B = 42;
+  const xs = series.flatMap((s) => s.pts.map((p) => p[0]));
+  const xMax = Math.max(...xs), yHi = yMax || Math.max(...series.flatMap((s) => s.pts.map((p) => p[1]))) * 1.12;
+  const x = (v) => L + v / xMax * (W - L - R);
+  const y = (v) => T + (1 - v / yHi) * (H - T - B);
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  niceTicks(0, yHi, 5).forEach((t) => {
+    el('line', { x1: L, x2: W - R, y1: y(t), y2: y(t), class: 'grid' }, svg);
+    el('text', { x: L - 8, y: y(t) + 4, 'text-anchor': 'end', class: 'ax' }, svg).textContent = yUnit(t);
+  });
+  (xTicks || niceTicks(0, xMax, 6)).forEach((t) => {
+    el('text', { x: x(t), y: H - B + 18, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = t;
+  });
+  el('line', { x1: L, x2: W - R, y1: y(0), y2: y(0), class: 'base' }, svg);
+  el('text', { x: (L + W - R) / 2, y: H - 4, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = xLabel;
+  const tip = tipFor(fig);
+  series.forEach((s) => {
+    el('path', { d: s.pts.map((p, i) => `${i ? 'L' : 'M'}${x(p[0])},${y(p[1])}`).join(' '), fill: 'none', stroke: COLOR[s.k], 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+    s.pts.forEach((p) => {
+      el('circle', { cx: x(p[0]), cy: y(p[1]), r: 4.5, fill: COLOR[s.k], stroke: 'var(--surface)', 'stroke-width': 2 }, svg);
+      const hit = el('circle', { cx: x(p[0]), cy: y(p[1]), r: 13, fill: 'transparent' }, svg);
+      hit.addEventListener('pointerenter', (e) => { const q = svgPoint(svg, e); tip.show(`<b>${s.label}</b><br>${p[0]} ${s.xNoun || ''}: ${yUnit(p[1])}${p[2] ? '<br>' + p[2] : ''}`, q.px, q.py); });
+      hit.addEventListener('pointerleave', () => tip.hide());
+    });
+    const last = s.pts[s.pts.length - 1];
+    el('text', { x: x(last[0]) + 10, y: y(last[1]) + 4, class: s.k === 'after' || s.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = `${s.short || s.label} ${yUnit(last[1])}`;
+  });
+  fig.appendChild(svg);
+}
+
+/* ---------- render ---------- */
+if (DATA.seek_by_position) document.getElementById('seekByPos').textContent = DATA.seek_by_position.ours.map((v) => Math.round(v) + ' ms').join(' → ');
+document.getElementById('configTable').innerHTML = `<thead><tr><th>Configuration</th><th>Player</th><th>Live-edge policy</th></tr></thead><tbody>
+  <tr><td><span class="mk" style="color:var(--s1)">●</span> <strong>Ours</strong></td><td>Production player (MSE)</td><td>Join newest segment; server pushes each new one</td></tr>
+  <tr><td><span class="mk" style="color:var(--s2)">●</span> HLS</td><td>hls.js 1.7.3, defaults</td><td>3 segments behind live; polls playlist</td></tr>
+  <tr><td><span class="mk" style="color:var(--s3)">●</span> HLS tuned</td><td>hls.js, <code>liveSyncDurationCount: 1</code></td><td>1 segment behind live; polls playlist</td></tr>
+  <tr><td><span class="mk" style="color:var(--s4)">●</span> DASH</td><td>dash.js 5.2.1, defaults</td><td>Delay from manifest; requests by template</td></tr>
+  <tr><td><span class="mk" style="color:var(--s5)">●</span> DASH tuned</td><td>dash.js, <code>liveDelay: 2.5 s</code>, catch-up on</td><td>~1 segment behind live</td></tr></tbody>`;
+
+const ttffMed = C.ours.ttff.median, bestOtherTtff = Math.min(...ORDER.slice(1).filter((k) => C[k]).map((k) => C[k].ttff.median));
+const delivMed = C.ours.delivery.median, bestOtherDeliv = Math.min(...ORDER.slice(1).filter((k) => C[k]).map((k) => C[k].delivery.median));
+const hlsReq = C.hls.requests_per_min.median;
+const udp1 = (DATA.udp || []).find((u) => u.loss_pct === 1);
+document.getElementById('keys').innerHTML = [
+  [fmt.ms(delivMed), `to deliver a new segment, vs ${fmt.ms(bestOtherDeliv)} for the best HLS/DASH setup (median)`],
+  [fmt.ms(ttffMed), `to first frame at the live edge, vs ${fmt.ms(bestOtherTtff)} for the fastest alternative`],
+  [loadTotals.m === 0 ? '0' : fmt.int(loadTotals.m), `corrupted bytes across ${fmt.int(loadTotals.d)} verified segment deliveries, up to 200 viewers`],
+  udp1 ? [fmt.int(udp1.decode_errors), `decoder errors in one minute of raw UDP video at just 1% packet loss`] : null,
+].filter(Boolean).map(([v, l]) => `<div class="key"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+document.getElementById('byline').textContent =
+  `${DATA.meta.trials} trials × ${DATA.configs.length} configurations · ${DATA.configs.reduce((n, c) => n + c.delivery_ms.length, 0).toLocaleString()} segment deliveries timed · single 8-core Windows host, headless Chromium`;
+
+strip('fTtff', 'ttff_ms');
+strip('fLatency', 'latency_run_medians_ms', { unit: fmt.s });
+cdf('fCdf');
+strip('fSeek', 'seek_ms');
+bars('fReq', ORDER.filter((k) => C[k]).map((k) => ({ k, v: C[k].requests_per_min.median })), (v) => v.toFixed(v < 10 ? 1 : 0) + ' /min');
+bars('fSegs', ORDER.filter((k) => C[k]).map((k) => ({ k, v: C[k].segments_fetched_per_session.median })), (v) => Math.round(v) + ' segs');
+
+if (LOAD.length) {
+  const before = (DATA.load_before_hub || {}).steps || [];
+  const ser = [];
+  if (before.length) ser.push({ k: 'before', label: 'Before: one Redis read per viewer', short: 'Before', xNoun: 'viewers', pts: before.map((s) => [s.n, s.p50, `p95 ${fmt.ms(s.p95)}`]) });
+  ser.push({ k: 'after', label: 'After: fan-out hub', short: 'After', xNoun: 'viewers', pts: LOAD.map((s) => [s.n, s.p50, `p95 ${fmt.ms(s.p95)} · ${fmt.mbps(s.aggregate_mbps)} total`]) });
+  lines('fScale', ser, { xLabel: 'concurrent viewers', yUnit: fmt.ms, xTicks: LOAD.map((s) => s.n).filter((n) => n !== 1 && n !== 10) });
+  document.getElementById('fScale').insertAdjacentHTML('beforeend', tableHTML(['Viewers', 'Median', 'p95', 'p99', 'Total throughput', 'Delivered', 'Hash mismatches'],
+    LOAD.map((s) => [s.n, fmt.ms(s.p50), fmt.ms(s.p95), fmt.ms(s.p99), fmt.mbps(s.aggregate_mbps), `${fmt.int(s.delivered)} / ${fmt.int(s.expected)}`, s.hash_mismatches])));
+  const cser = [];
+  if (before.length) cser.push({ k: 'before', label: 'Before: one Redis read per viewer', short: 'Before', xNoun: 'viewers', pts: before.map((s) => [s.n, s.server_cpu_pct]) });
+  cser.push({ k: 'after', label: 'After: fan-out hub', short: 'After', xNoun: 'viewers', pts: LOAD.map((s) => [s.n, s.server_cpu_pct]) });
+  lines('fCpu', cser, { xLabel: 'concurrent viewers', yUnit: (v) => fmt.pct(v), xTicks: LOAD.map((s) => s.n).filter((n) => n !== 1 && n !== 10) });
+  document.getElementById('fCpu').insertAdjacentHTML('beforeend', tableHTML(['Viewers', 'Server CPU before', 'Server CPU after'],
+    LOAD.map((s) => { const b = before.find((x) => x.n === s.n); return [s.n, b ? fmt.pct(b.server_cpu_pct) : '—', fmt.pct(s.server_cpu_pct)]; })));
+}
+
+if (DATA.udp && DATA.udp.length) {
+  const u = DATA.udp.filter(Boolean);
+  lines('fUdp', [{ k: 'udp', label: 'UDP / MPEG-TS', short: 'UDP', xNoun: '% loss', pts: u.map((r) => [r.loss_pct, r.frame_loss_pct, `${fmt.int(r.continuity_errors)} continuity errors · ${fmt.int(r.decode_errors)} decoder errors`]) }],
+    { xLabel: 'datagrams lost (%)', yUnit: fmt.pct, xTicks: u.map((r) => r.loss_pct).filter((v) => v >= 1 || v === 0) });
+  document.getElementById('fUdp').insertAdjacentHTML('beforeend', tableHTML(['Datagram loss', 'Frames decoded', 'Frames lost', 'Continuity errors', 'Decoder errors'],
+    u.map((r) => [r.loss_pct + '%', `${fmt.int(r.frames_decoded)} / ${fmt.int(r.frames_expected)}`, fmt.pct(r.frame_loss_pct), fmt.int(r.continuity_errors), fmt.int(r.decode_errors)])));
+}
+
+/* ---------- comparison matrix ---------- */
+const ICON = {
+  y: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.4 4.5z"/></svg>',
+  n: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M4.2 3.1 8 6.9l3.8-3.8 1.1 1.1L9.1 8l3.8 3.8-1.1 1.1L8 9.1l-3.8 3.8-1.1-1.1L6.9 8 3.1 4.2z"/></svg>',
+  p: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zm0 1.5v9a4.5 4.5 0 0 1 0-9z"/></svg>',
+};
+const mk = (v, text) => `<span class="mk ${v}">${ICON[v]}${text || { y: 'Yes', n: 'No', p: 'Partial' }[v]}</span>`;
+const measured = (k) => ({ d: fmt.ms(C[k].delivery.median), t: fmt.ms(C[k].ttff.median) });
+const M = [
+  ['Measured in this study', null],
+  ['New-segment delivery (median)', ['y', measured('ours').d], ['n', measured('hls-tuned').d], ['n', measured('dash-tuned').d], ['y', 'Immediate (not timed)']],
+  ['Time to first frame (median)', ['y', measured('ours').t], ['p', measured('hls').t], ['p', measured('dash').t], ['p', 'Next keyframe (not timed)']],
+  ['Seek into stream history (median)', ['p', fmt.ms(C.ours.seek.median) + ' (slowest)'], ['y', fmt.ms(C.hls.seek.median)], ['y', fmt.ms(C.dash.seek.median)], ['n', 'Impossible']],
+  ['Stalls during steady playback', ['y', 'None'], ['p', `None by default; tuned ${C['hls-tuned'].stalls_per_run.mean.toFixed(1)} per 15 s`],['n', `${Math.round(C.dash.stalls_per_run.mean)} per 15 s`], ['p', 'Corruption instead']],
+  ['Intact delivery under packet loss', ['y', 'TCP'], ['y', 'TCP'], ['y', 'TCP'], ['n', udp1 ? fmt.int(udp1.decode_errors) + ' decode errors/min at 1%' : 'No']],
+  ['Origin requests per viewer', ['y', '1 socket / session'], ['n', `${Math.round(C.hls.requests_per_min.median)} / min`], ['n', `${Math.round(C.dash.requests_per_min.median)} / min`], ['y', 'None']],
+  ['Bandwidth after a seek', ['n', 'Pushes to live edge'], ['y', '30 s buffer'], ['y', 'Bounded buffer'], ['p', 'n/a']],
+  ['Built into the design', null],
+  ['Join late, watch from the start', ['y'], ['y', 'EVENT playlist'], ['y', 'Time-shift window'], ['n']],
+  ['Resume across sessions (server-side)', ['y'], ['n', 'App must build it'], ['n', 'App must build it'], ['n']],
+  ['Per-viewer analytics pipeline', ['y', 'Kafka'], ['n', 'Beacons needed'], ['n', 'Beacons needed'], ['n']],
+  ['Live viewer count per stream', ['y'], ['p', 'Estimate from logs'], ['p', 'Estimate from logs'], ['n']],
+  ['Adaptive bitrate', ['n'], ['y'], ['y'], ['n']],
+  ['CDN / HTTP-cache friendly', ['n'], ['y'], ['y'], ['n']],
+  ['Plays on iPhone', ['n', 'Needs MSE'], ['y', 'Native'], ['n', 'Needs MSE'], ['n']],
+  ['Network egress with N viewers', ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['y', '1 × (multicast)']],
+  ['Internet scale', ['n', 'Single origin'], ['y'], ['y'], ['n']],
+];
+document.getElementById('matrix').innerHTML =
+  `<colgroup><col><col class="ours"><col><col><col></colgroup><thead><tr><th></th><th>Ours</th><th>HLS</th><th>DASH</th><th>UDP multicast</th></tr></thead><tbody>` +
+  M.map((r) => r[1] === null
+    ? `<tr><th colspan="5" style="padding-top:18px;color:var(--ink);font-family:var(--cond);font-size:14px">${r[0]}</th></tr>`
+    : `<tr><td>${r[0]}</td>${r.slice(1).map(([v, t]) => `<td>${mk(v, t)}</td>`).join('')}</tr>`).join('') + '</tbody>';
+</script>

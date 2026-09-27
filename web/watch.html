@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch · LANFLIX</title>
+<link rel="stylesheet" href="assets/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6cff'/%3E%3Cstop offset='1' stop-color='%23ff4d63'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M12 9v14l11-7z' fill='white'/%3E%3C/svg%3E">
+<style>
+  .chips { display: flex; gap: 6px; }
+  .chip { height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border-strong); background: transparent; color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; }
+  .chip.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .now-title { margin: 18px 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+</style>
+</head>
+<body>
+  <main class="container">
+
+    <!-- Browse -->
+    <div id="browseView" class="hidden">
+      <div class="section">
+        <h1 class="page-title">Watch</h1>
+        <p class="page-sub">Everything streaming on your network right now.</p>
+      </div>
+      <section class="section hidden" id="cwSection">
+        <div class="section-head"><h2 class="section-title">Continue watching</h2></div>
+        <div class="row-scroll" id="cwRow"></div>
+      </section>
+      <section class="section">
+        <div class="section-head"><h2 class="section-title">Rooms</h2><span class="section-sub" id="roomsSub"></span></div>
+        <div class="grid" id="roomGrid"></div>
+      </section>
+    </div>
+
+    <!-- One room -->
+    <div id="roomView" class="hidden">
+      <div class="breadcrumb"><a href="watch.html">Watch</a> <span>/</span> <span id="roomCrumb"></span></div>
+      <div class="section-head" style="align-items:flex-end;flex-wrap:wrap">
+        <div>
+          <h1 class="page-title" id="roomTitle"></h1>
+          <p class="page-sub" id="roomSub"></p>
+        </div>
+        <div class="chips" id="sortChips">
+          <button class="chip on" data-sort="trending">Trending</button>
+          <button class="chip" data-sort="popular">Most watched</button>
+          <button class="chip" data-sort="newest">Newest</button>
+        </div>
+      </div>
+      <div class="grid section" id="streamGrid" style="margin-top:22px"></div>
+    </div>
+
+    <!-- Player -->
+    <div id="playerView" class="hidden">
+      <div class="breadcrumb"><a href="watch.html">Watch</a> <span>/</span> <a id="playerRoomCrumb"></a></div>
+      <div class="watch-layout">
+        <div>
+          <div class="player" id="player">
+            <video id="video" playsinline></video>
+            <div class="nerd hidden" id="nerd"></div>
+            <div class="player-center">
+              <div class="spinner hidden" id="spinner"></div>
+              <button class="big-play hidden" id="bigPlay" aria-label="Play"></button>
+            </div>
+            <div class="player-overlay">
+              <div class="controls">
+                <div class="timeline" id="timeline">
+                  <div class="timeline-track">
+                    <div class="timeline-cached" id="tlCached"></div>
+                    <div class="timeline-buffered" id="tlBuffered"></div>
+                    <div class="timeline-played" id="tlPlayed"></div>
+                  </div>
+                  <div class="timeline-thumb" id="tlThumb"></div>
+                  <div class="timeline-tip" id="tlTip">0:00</div>
+                </div>
+                <div class="control-row">
+                  <button class="cbtn" id="playBtn" aria-label="Play/pause"></button>
+                  <button class="cbtn hide-sm" id="backBtn" aria-label="Back 10 seconds"></button>
+                  <button class="cbtn hide-sm" id="fwdBtn" aria-label="Forward 10 seconds"></button>
+                  <div class="vol-group">
+                    <button class="cbtn" id="muteBtn" aria-label="Mute"></button>
+                    <input class="volume" id="volume" type="range" min="0" max="1" step="0.05" aria-label="Volume">
+                  </div>
+                  <span class="time" id="timeText">0:00 / 0:00</span>
+                  <button class="live-btn" id="liveBtn"><span class="dot"></span>LIVE</button>
+                  <div class="header-spacer"></div>
+                  <button class="cbtn hide-sm" id="statsBtn" aria-label="Stats for nerds"></button>
+                  <button class="cbtn" id="fsBtn" aria-label="Fullscreen"></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <h1 class="now-title" id="nowTitle"></h1>
+          <div class="meta" id="nowMeta"></div>
+          <div class="shortcuts">
+            <span><span class="kbd">Space</span> play/pause</span>
+            <span><span class="kbd">←</span><span class="kbd">→</span> 10s</span>
+            <span><span class="kbd">L</span> jump to live</span>
+            <span><span class="kbd">M</span> mute</span>
+            <span><span class="kbd">F</span> fullscreen</span>
+            <span><span class="kbd">I</span> stats</span>
+          </div>
+        </div>
+
+        <aside>
+          <div class="section-head" style="margin-bottom:12px"><h2 class="section-title" style="font-size:16px">In this room</h2></div>
+          <div class="side-list" id="sideList"></div>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+<script type="module">
+import {
+  renderHeader, icon, esc, getJSON, clientID, fmtTime, timeAgo, toast,
+  artHTML, statusPill, emptyHTML, watchingNowByMovie, cachedDuration,
+} from './assets/app.js';
+import { StreamPlayer } from './assets/player.js';
+
+renderHeader('watch');
+
+const views = ['browseView', 'roomView', 'playerView'];
+function show(id) { views.forEach((v) => document.getElementById(v).classList.toggle('hidden', v !== id)); }
+
+let pollTimers = [];
+function every(ms, fn) { fn(); pollTimers.push(setInterval(fn, ms)); }
+function stopPolling() { pollTimers.forEach(clearInterval); pollTimers = []; }
+
+// ================= browse =================
+
+async function renderBrowse() {
+  show('browseView');
+  document.title = 'Watch · LANFLIX';
+
+  try {
+    const items = await getJSON('/api/continue-watching?client_id=' + encodeURIComponent(clientID()));
+    const sec = document.getElementById('cwSection');
+    sec.classList.toggle('hidden', items.length === 0);
+    document.getElementById('cwRow').innerHTML = items.map(({ movie: m, position_ms: pos }) => {
+      const pct = Math.min(100, (pos / Math.max(1, cachedDuration(m))) * 100);
+      return `
+        <a class="tile" href="watch.html?room=${encodeURIComponent(m.room_id)}&movie=${encodeURIComponent(m.id)}" data-nav>
+          <div class="tile-art">
+            ${artHTML({ posterId: m.id, seed: m.title, label: m.title })}
+            <div class="tile-badges">${statusPill(m.status)}<span></span></div>
+            <div class="tile-play"><span>${icon.play}</span></div>
+            <div class="tile-progress"><div style="width:${pct.toFixed(1)}%"></div></div>
+          </div>
+          <div class="tile-body">
+            <h3 class="tile-title">${esc(m.title)}</h3>
+            <div class="meta"><span>Resume at ${fmtTime(pos)}</span><span>of ${fmtTime(cachedDuration(m))}</span></div>
+          </div>
+        </a>`;
+    }).join('');
+  } catch { /* optional row */ }
+
+  every(3000, async () => {
+    let rooms = [];
+    try { rooms = await getJSON('/api/rooms'); } catch { return; }
+    rooms.sort((a, b) => b.live_count - a.live_count || b.created_at_ms - a.created_at_ms);
+    const live = rooms.filter((r) => r.live_count > 0).length;
+    document.getElementById('roomsSub').textContent = rooms.length ? `${rooms.length} room${rooms.length === 1 ? '' : 's'} · ${live} live` : '';
+    document.getElementById('roomGrid').innerHTML = rooms.length ? rooms.map((r) => `
+      <a class="tile" href="watch.html?room=${encodeURIComponent(r.id)}" data-nav>
+        <div class="tile-art">
+          ${artHTML({ posterId: r.poster_movie_id, seed: r.name, label: r.name })}
+          <div class="tile-badges">${r.live_count ? `<span class="pill live"><span class="live-dot"></span>${r.live_count} live</span>` : '<span class="pill ended">Replays</span>'}<span></span></div>
+        </div>
+        <div class="tile-body">
+          <h3 class="tile-title">${esc(r.name)}</h3>
+          <div class="meta"><span>${r.stream_count} stream${r.stream_count === 1 ? '' : 's'}</span><span>created ${timeAgo(r.created_at_ms)}</span></div>
+        </div>
+      </a>`).join('') : emptyHTML('Nothing streaming yet', 'Ask someone on your network to host a room.');
+  });
+}
+
+// ================= room =================
+
+let sortMode = 'trending';
+
+async function renderRoom(roomId) {
+  show('roomView');
+  let room;
+  try { room = await getJSON('/api/room?id=' + encodeURIComponent(roomId)); }
+  catch { document.getElementById('streamGrid').innerHTML = emptyHTML('Room not found', 'It may have been deleted.'); return; }
+  document.title = `${room.name} · LANFLIX`;
+  document.getElementById('roomTitle').textContent = room.name;
+  document.getElementById('roomCrumb').textContent = room.name;
+
+  let movies = [];
+  let counts = {};
+  const draw = () => {
+    const sorted = [...movies].sort((a, b) => {
+      if (sortMode === 'popular') return (b.total_viewers_ever || 0) - (a.total_viewers_ever || 0) || b.started_at_ms - a.started_at_ms;
+      if (sortMode === 'newest') return b.started_at_ms - a.started_at_ms;
+      // trending: live first, then who's watching right now
+      return (a.status === 'ended') - (b.status === 'ended') || (counts[b.id] || 0) - (counts[a.id] || 0) || b.started_at_ms - a.started_at_ms;
+    });
+    const live = movies.filter((m) => m.status !== 'ended').length;
+    document.getElementById('roomSub').textContent = `${movies.length} stream${movies.length === 1 ? '' : 's'} · ${live} live`;
+    document.getElementById('streamGrid').innerHTML = sorted.length ? sorted.map((m) => `
+      <a class="tile" href="watch.html?room=${encodeURIComponent(roomId)}&movie=${encodeURIComponent(m.id)}" data-nav>
+        <div class="tile-art">
+          ${artHTML({ posterId: m.id, seed: m.title, label: m.title })}
+          <div class="tile-badges">${statusPill(m.status)}<span class="pill">${fmtTime(cachedDuration(m))}</span></div>
+          <div class="tile-play"><span>${icon.play}</span></div>
+        </div>
+        <div class="tile-body">
+          <h3 class="tile-title">${esc(m.title)}</h3>
+          <div class="meta"><span>${icon.eye}${counts[m.id] || 0} watching</span><span>${icon.users}${m.total_viewers_ever || 0} all-time</span></div>
+        </div>
+      </a>`).join('') : emptyHTML('Nothing in this room yet', 'Streams show up here the moment the host goes live.');
+  };
+
+  document.getElementById('sortChips').onclick = (e) => {
+    const chip = e.target.closest('[data-sort]');
+    if (!chip) return;
+    sortMode = chip.dataset.sort;
+    document.querySelectorAll('#sortChips .chip').forEach((c) => c.classList.toggle('on', c === chip));
+    draw();
+  };
+
+  every(2500, async () => {
+    try {
+      [movies, counts] = await Promise.all([getJSON('/api/movies?room=' + encodeURIComponent(roomId)), watchingNowByMovie()]);
+    } catch { return; }
+    draw();
+  });
+}
+
+// ================= player =================
+
+const video = document.getElementById('video');
+const playerEl = document.getElementById('player');
+const player = new StreamPlayer(video, { onLog: (m) => console.debug('[player]', m) });
+let current = null; // { roomId, movieId, meta }
+
+function setIcons() {
+  document.getElementById('bigPlay').innerHTML = icon.play;
+  document.getElementById('backBtn').innerHTML = icon.back10;
+  document.getElementById('fwdBtn').innerHTML = icon.fwd10;
+  document.getElementById('statsBtn').innerHTML = icon.stats;
+  document.getElementById('fsBtn').innerHTML = icon.fullscreen;
+  syncPlayIcon();
+  syncMuteIcon();
+}
+const syncPlayIcon = () => { document.getElementById('playBtn').innerHTML = video.paused ? icon.play : icon.pause; };
+const syncMuteIcon = () => { document.getElementById('muteBtn').innerHTML = video.muted || video.volume === 0 ? icon.muted : icon.volume; };
+
+async function renderPlayer(roomId, movieId) {
+  show('playerView');
+  if (!StreamPlayer.supported()) {
+    playerEl.innerHTML = emptyHTML('This browser cannot play these streams', 'It needs Media Source Extensions with H.264/AAC — try Chrome, Edge or Firefox on a computer.');
+    return;
+  }
+  current = { roomId, movieId, meta: null };
+  document.getElementById('nowTitle').textContent = '';
+  document.getElementById('nowMeta').innerHTML = '';
+  document.getElementById('spinner').classList.remove('hidden');
+  document.getElementById('bigPlay').classList.add('hidden');
+
+  try {
+    const room = await getJSON('/api/room?id=' + encodeURIComponent(roomId));
+    const crumb = document.getElementById('playerRoomCrumb');
+    crumb.textContent = room.name;
+    crumb.href = 'watch.html?room=' + encodeURIComponent(roomId);
+    crumb.dataset.nav = '';
+  } catch { /* breadcrumb is cosmetic */ }
+
+  await pollMovie();
+  const resumeMs = await player.open(movieId);
+  if (resumeMs > 0) toast(`Resuming at ${fmtTime(resumeMs)}`);
+
+  // Autoplay with sound is often blocked on a fresh page load; if it is,
+  // fall back to a big play button instead of a silent stall.
+  video.play().catch(() => {
+    document.getElementById('spinner').classList.add('hidden');
+    document.getElementById('bigPlay').classList.remove('hidden');
+  });
+
+  every(1000, pollMovie);
+  every(3000, drawSideList);
+}
+
+async function pollMovie() {
+  if (!current) return;
+  let m;
+  try { m = await getJSON('/api/movie?id=' + encodeURIComponent(current.movieId)); } catch { return; }
+  current.meta = m;
+  if (m.has_live_edge) player.liveEdgeMs = m.live_edge_ms;
+  document.title = `${m.title} · LANFLIX`;
+  document.getElementById('nowTitle').textContent = m.title;
+  document.getElementById('nowMeta').innerHTML = `
+    ${statusPill(m.status)}
+    <span>${icon.clock}${fmtTime(cachedDuration(m))} ${m.status === 'ended' ? 'long' : 'streamed so far'}</span>
+    <span>${icon.users}${m.total_viewers_ever || 0} all-time viewers</span>`;
+}
+
+async function drawSideList() {
+  if (!current) return;
+  let movies = [];
+  let counts = {};
+  try {
+    [movies, counts] = await Promise.all([getJSON('/api/movies?room=' + encodeURIComponent(current.roomId)), watchingNowByMovie()]);
+  } catch { return; }
+  movies.sort((a, b) => (a.status === 'ended') - (b.status === 'ended') || b.started_at_ms - a.started_at_ms);
+  document.getElementById('sideList').innerHTML = movies.map((m) => `
+    <a class="side-item ${m.id === current.movieId ? 'current' : ''}" href="watch.html?room=${encodeURIComponent(current.roomId)}&movie=${encodeURIComponent(m.id)}" data-nav>
+      <div class="tile-art">${artHTML({ posterId: m.id, seed: m.title, label: m.title })}</div>
+      <div>
+        <div class="t">${esc(m.title)}</div>
+        <div class="meta" style="margin-top:4px">${m.status !== 'ended' ? '<span style="color:var(--live)">● Live</span>' : ''}<span>${counts[m.id] || 0} watching</span></div>
+      </div>
+    </a>`).join('');
+}
+
+// ---- controls ----
+
+function togglePlay() { if (video.paused) video.play().catch(() => {}); else video.pause(); }
+function seekBy(delta) { const ms = player.seekTo(video.currentTime * 1000 + delta); toast(`${delta > 0 ? '+' : '−'}10s · ${fmtTime(ms)}`); }
+function goLive() { player.seekTo(player.liveEdgeMs); }
+function toggleMute() { video.muted = !video.muted; if (!video.muted && video.volume === 0) video.volume = 0.8; syncMuteIcon(); }
+function toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen(); else playerEl.requestFullscreen?.(); }
+const nerd = document.getElementById('nerd');
+function toggleNerd() { nerd.classList.toggle('hidden'); }
+
+document.getElementById('playBtn').onclick = togglePlay;
+document.getElementById('bigPlay').onclick = togglePlay;
+document.getElementById('backBtn').onclick = () => seekBy(-10000);
+document.getElementById('fwdBtn').onclick = () => seekBy(10000);
+document.getElementById('liveBtn').onclick = goLive;
+document.getElementById('muteBtn').onclick = toggleMute;
+document.getElementById('fsBtn').onclick = toggleFullscreen;
+document.getElementById('statsBtn').onclick = toggleNerd;
+video.addEventListener('click', togglePlay);
+video.addEventListener('dblclick', toggleFullscreen);
+
+const volume = document.getElementById('volume');
+try { const v = parseFloat(localStorage.getItem('volume')); if (!isNaN(v)) video.volume = v; } catch {}
+volume.value = video.volume;
+volume.addEventListener('input', () => {
+  video.volume = parseFloat(volume.value);
+  video.muted = video.volume === 0;
+  try { localStorage.setItem('volume', String(video.volume)); } catch {}
+  syncMuteIcon();
+});
+
+video.addEventListener('play', () => { syncPlayIcon(); document.getElementById('bigPlay').classList.add('hidden'); });
+video.addEventListener('pause', () => { syncPlayIcon(); document.getElementById('bigPlay').classList.remove('hidden'); });
+video.addEventListener('waiting', () => document.getElementById('spinner').classList.remove('hidden'));
+video.addEventListener('playing', () => document.getElementById('spinner').classList.add('hidden'));
+video.addEventListener('canplay', () => document.getElementById('spinner').classList.add('hidden'));
+
+// Timeline: the whole bar spans what's cached so far, so for a live
+// stream it grows as the host's encoder produces more.
+const timeline = document.getElementById('timeline');
+const totalMs = () => Math.max(1, current && current.meta ? cachedDuration(current.meta) : 1);
+function fractionAt(clientX) {
+  const r = timeline.getBoundingClientRect();
+  return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+}
+let dragging = false;
+timeline.addEventListener('pointerdown', (e) => { dragging = true; timeline.classList.add('dragging'); timeline.setPointerCapture(e.pointerId); });
+timeline.addEventListener('pointermove', (e) => {
+  const f = fractionAt(e.clientX);
+  const tip = document.getElementById('tlTip');
+  tip.style.left = (f * 100) + '%';
+  tip.textContent = fmtTime(f * totalMs());
+  if (dragging) document.getElementById('tlPlayed').style.width = (f * 100) + '%';
+});
+timeline.addEventListener('pointerup', (e) => {
+  if (!dragging) return;
+  dragging = false;
+  timeline.classList.remove('dragging');
+  player.seekTo(fractionAt(e.clientX) * totalMs());
+});
+
+function tick() {
+  if (current && current.meta) {
+    const total = totalMs();
+    const pos = video.currentTime * 1000;
+    document.getElementById('tlCached').style.width = '100%';
+    if (!dragging) {
+      const pct = Math.min(100, (pos / total) * 100);
+      document.getElementById('tlPlayed').style.width = pct + '%';
+      document.getElementById('tlThumb').style.left = pct + '%';
+    }
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (video.buffered.start(i) <= video.currentTime + 0.5 && video.buffered.end(i) >= video.currentTime) {
+        const b = document.getElementById('tlBuffered');
+        b.style.left = (video.buffered.start(i) * 1000 / total * 100) + '%';
+        b.style.width = Math.max(0, (video.buffered.end(i) - video.buffered.start(i)) * 1000 / total * 100) + '%';
+      }
+    }
+    document.getElementById('timeText').textContent = `${fmtTime(pos)} / ${fmtTime(total)}`;
+    const isLive = current.meta.status !== 'ended';
+    const liveBtn = document.getElementById('liveBtn');
+    liveBtn.classList.toggle('hidden', !isLive);
+    liveBtn.classList.toggle('at-edge', isLive && player.behindLiveMs() < 5000);
+
+    if (!nerd.classList.contains('hidden')) {
+      const s = player.stats;
+      let ahead = 0;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= video.currentTime && video.buffered.end(i) >= video.currentTime) ahead = video.buffered.end(i) - video.currentTime;
+      }
+      nerd.innerHTML = `
+        <div><b>Movie</b>${esc(current.movieId)}</div>
+        <div><b>Transport</b>WebSocket push (Redis Streams)</div>
+        <div><b>Codec</b>${esc((s.codec || '–').replace(/^video\/mp4; codecs=/, ''))}</div>
+        <div><b>Time to first frame</b>${s.ttffMs == null ? '–' : s.ttffMs.toFixed(0) + ' ms'}</div>
+        <div><b>First byte</b>${s.firstByteAt == null ? '–' : (s.firstByteAt - s.requestedAt).toFixed(0) + ' ms'}</div>
+        <div><b>Behind live</b>${isLive ? (player.behindLiveMs() / 1000).toFixed(1) + ' s' : 'n/a (replay)'}</div>
+        <div><b>Buffer ahead</b>${ahead.toFixed(1)} s</div>
+        <div><b>Chunks / bytes</b>${s.chunks} / ${(s.bytes / 1e6).toFixed(1)} MB</div>
+        <div><b>Resumed from</b>${fmtTime(s.fromMs)}</div>`;
+    }
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// Hide the controls while playing and the mouse is still.
+let idleTimer;
+function wake() {
+  playerEl.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { if (!video.paused) playerEl.classList.add('idle'); }, 2500);
+}
+playerEl.addEventListener('mousemove', wake);
+video.addEventListener('pause', wake);
+
+document.addEventListener('keydown', (e) => {
+  if (document.getElementById('playerView').classList.contains('hidden')) return;
+  if (e.target.closest('input, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === ' ' || k === 'k') { e.preventDefault(); togglePlay(); }
+  else if (k === 'arrowleft' || k === 'j') { e.preventDefault(); seekBy(-10000); }
+  else if (k === 'arrowright') { e.preventDefault(); seekBy(10000); }
+  else if (k === 'l') goLive();
+  else if (k === 'm') toggleMute();
+  else if (k === 'f') toggleFullscreen();
+  else if (k === 'i') toggleNerd();
+  else return;
+  wake();
+});
+
+// ================= routing =================
+// Links marked data-nav switch views in place (no page reload), so
+// jumping between streams in a room doesn't tear down the whole page.
+
+function route() {
+  stopPolling();
+  player.teardown();
+  current = null;
+  video.removeAttribute('src');
+  video.load();
+  const q = new URLSearchParams(location.search);
+  const roomId = q.get('room');
+  const movieId = q.get('movie');
+  if (roomId && movieId) renderPlayer(roomId, movieId);
+  else if (roomId) renderRoom(roomId);
+  else renderBrowse();
+  window.scrollTo(0, 0);
+}
+
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-nav]');
+  if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault();
+  history.pushState(null, '', a.getAttribute('href'));
+  route();
+});
+window.addEventListener('popstate', route);
+
+setIcons();
+route();
+</script>
+</body>
+</html>
