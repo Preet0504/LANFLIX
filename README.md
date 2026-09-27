@@ -45,32 +45,9 @@ Under the hood, video segments live in **Redis Streams** and are **pushed** to b
 
 ## How it works
 
-```mermaid
-flowchart LR
-  subgraph Host
-    U[Video upload]
-  end
-  subgraph Server["cmd/server (Go)"]
-    F[ffmpeg<br/>fragmented MP4 on stdout]
-    D[Box demuxer<br/>init + moof/mdat segments]
-    H[Fan-out hub<br/>one Redis tail per stream]
-    W[WebSocket per viewer]
-  end
-  R[(Redis Streams<br/>one stream per video<br/>entry ID = PTS)]
-  K[(Kafka<br/>viewer-positions)]
-  DB[cmd/dashboard<br/>live viewers :8091]
-  AN[cmd/analytics<br/>retention curves]
-  V[Browser<br/>MediaSource player]
+![LANFLIX architecture: upload → ffmpeg → demuxer → Redis Streams → fan-out hub → WebSocket → browser; positions → Kafka → dashboard and analytics](docs/architecture.png)
 
-  U --> F --> D -->|XADD| R
-  R -->|XREAD| H --> W -->|binary push| V
-  R -->|XRANGE on seek / late join| W
-  V -->|seek_ms, position_ms| W
-  W -->|position events| K
-  W -->|resume point| R
-  K --> DB
-  K --> AN -->|reach| R
-```
+<sub>Diagram source: [docs/architecture.mmd](docs/architecture.mmd) (Mermaid).</sub>
 
 **Ingest.** An uploaded file is saved to `uploads/<id>/` and encoded in real time by ffmpeg into fragmented MP4 (H.264 + AAC, keyframe every 2 s) written to stdout. A Go demuxer in [internal/chunker](internal/chunker/chunker.go) parses MP4 boxes off the pipe. `ftyp+moov` becomes the init segment, and each `moof+mdat` pair becomes one segment. Nothing touches disk.
 

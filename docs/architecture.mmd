@@ -1,0 +1,24 @@
+flowchart LR
+  subgraph Host
+    U[Video upload]
+  end
+  subgraph Server["cmd/server (Go)"]
+    F[ffmpeg<br/>fragmented MP4 on stdout]
+    D[Box demuxer<br/>init + moof/mdat segments]
+    H[Fan-out hub<br/>one Redis tail per stream]
+    W[WebSocket per viewer]
+  end
+  R[(Redis Streams<br/>one stream per video<br/>entry ID = PTS)]
+  K[(Kafka<br/>viewer-positions)]
+  DB[cmd/dashboard<br/>live viewers :8091]
+  AN[cmd/analytics<br/>retention curves]
+  V[Browser<br/>MediaSource player]
+
+  U --> F --> D -->|XADD| R
+  R -->|XREAD| H --> W -->|binary push| V
+  R -->|XRANGE on seek / late join| W
+  V -->|seek_ms, position_ms| W
+  W -->|position events| K
+  W -->|resume point| R
+  K --> DB
+  K --> AN -->|reach| R
