@@ -26,12 +26,18 @@ type Chunk struct {
 }
 
 type Store struct {
-	rdb *redis.Client
+	rdb    *redis.Client
+	maxLen int64
 }
 
 func NewStore(addr string) *Store {
-	return &Store{rdb: redis.NewClient(&redis.Options{Addr: addr})}
+	return &Store{rdb: redis.NewClient(&redis.Options{Addr: addr}), maxLen: defaultMaxLen}
 }
+
+// SetMaxLen changes how many chunks each stream retains; 0 keeps all.
+// The default is sized for 2s chunks — a stream of 200ms low-latency
+// chunks would fall out of the cache ten times sooner.
+func (s *Store) SetMaxLen(n int64) { s.maxLen = n }
 
 func (s *Store) Close() error { return s.rdb.Close() }
 
@@ -41,6 +47,13 @@ func streamKey(movieID string) string {
 
 func initKey(movieID string) string {
 	return "movie:" + movieID + ":init"
+}
+
+// keyframesKey indexes the entries a decoder can start from (score = PTS
+// ms, member = entry ID). With one chunk per GOP that's every entry; with
+// sub-GOP chunks (low-latency mode) most chunks can't be decoded alone.
+func keyframesKey(movieID string) string {
+	return "movie:" + movieID + ":keyframes"
 }
 
 // SetInit stores the movie's one-time MP4 initialization segment (codec
@@ -69,19 +82,24 @@ func (s *Store) PublishChunk(ctx context.Context, movieID string, c Chunk) (stri
 	// ID is keyed on the video's own PTS timeline, not wall-clock time —
 	// that's what lets RangeFrom seek by PTS with a plain XRANGE instead
 	// of a separate index.
-	id, err := s.rdb.XAdd(ctx, &redis.XAddArgs{
+	id := fmt.Sprintf("%d-%d", c.PTSMillis, c.Seq+1) // +1: Redis rejects the reserved ID "0-0"
+	pipe := s.rdb.TxPipeline()
+	pipe.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey(movieID),
-		ID:     fmt.Sprintf("%d-%d", c.PTSMillis, c.Seq+1), // +1: Redis rejects the reserved ID "0-0"
-		MaxLen: defaultMaxLen,
-		Approx: true,
+		ID:     id,
+		MaxLen: s.maxLen,
+		Approx: s.maxLen > 0,
 		Values: map[string]interface{}{
 			"seq":      c.Seq,
 			"pts_ms":   c.PTSMillis,
 			"keyframe": c.Keyframe,
 			"data":     c.Data,
 		},
-	}).Result()
-	if err != nil {
+	})
+	if c.Keyframe {
+		pipe.ZAdd(ctx, keyframesKey(movieID), redis.Z{Score: float64(c.PTSMillis), Member: id})
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
 		return "", fmt.Errorf("publish chunk seq=%d: %w", c.Seq, err)
 	}
 	return id, nil
@@ -119,12 +137,9 @@ func (s *Store) StreamFrom(ctx context.Context, movieID string, fromMillis int64
 	key := streamKey(movieID)
 	start := "-"
 	if fromMillis > 0 {
-		containing, err := s.rdb.XRevRangeN(ctx, key, strconv.FormatInt(fromMillis, 10), "-", 1).Result()
-		if err != nil {
-			return "", fmt.Errorf("find containing segment for %d: %w", fromMillis, err)
-		}
-		if len(containing) > 0 {
-			start = containing[0].ID
+		var err error
+		if start, err = s.startEntry(ctx, movieID, fromMillis); err != nil {
+			return "", err
 		}
 	}
 	lastID := ""
@@ -152,6 +167,31 @@ func (s *Store) StreamFrom(ctx context.Context, movieID string, fromMillis int64
 		lastID = "0-0" // nothing yet: tail everything that arrives
 	}
 	return lastID, nil
+}
+
+// startEntry picks the entry a viewer starting at fromMillis must begin
+// from: the last keyframe chunk at or before it. Starting on any other
+// chunk hands the decoder frames that reference ones it never received.
+// Streams published before the keyframe index existed (all one-GOP
+// chunks, so every entry is a keyframe) fall back to the containing entry.
+func (s *Store) startEntry(ctx context.Context, movieID string, fromMillis int64) (string, error) {
+	ids, err := s.rdb.ZRevRangeByScore(ctx, keyframesKey(movieID), &redis.ZRangeBy{
+		Max: strconv.FormatInt(fromMillis, 10), Min: "-inf", Count: 1,
+	}).Result()
+	if err != nil {
+		return "", fmt.Errorf("find keyframe for %d: %w", fromMillis, err)
+	}
+	if len(ids) > 0 {
+		return ids[0], nil
+	}
+	containing, err := s.rdb.XRevRangeN(ctx, streamKey(movieID), strconv.FormatInt(fromMillis, 10), "-", 1).Result()
+	if err != nil {
+		return "", fmt.Errorf("find containing segment for %d: %w", fromMillis, err)
+	}
+	if len(containing) > 0 {
+		return containing[0].ID, nil
+	}
+	return "-", nil
 }
 
 // Tail blocks waiting for chunks after afterID and calls handler for each,
@@ -553,6 +593,7 @@ func (s *Store) DeleteMovie(ctx context.Context, movieID string) error {
 	pipe := s.rdb.Pipeline()
 	pipe.Del(ctx, streamKey(movieID))
 	pipe.Del(ctx, initKey(movieID))
+	pipe.Del(ctx, keyframesKey(movieID))
 	pipe.Del(ctx, movieMetaKey(movieID))
 	pipe.Del(ctx, reachKey(movieID))
 	pipe.Del(ctx, heartbeatKey(movieID))

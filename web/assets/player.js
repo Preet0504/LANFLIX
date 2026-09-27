@@ -74,7 +74,11 @@ export class StreamPlayer {
   connect(fromMs) {
     this.teardown();
     const video = this.video;
-    const conn = { ws: null, sb: null, queue: [], timer: null, closed: false, appends: 0, retry: null };
+    // awaitAck: the seek (ms) whose {"seek_ack"} hasn't arrived yet; media
+    // received meanwhile belongs to the previous position and is dropped.
+    // pendingSeek: where playback should be once buffered media covers it.
+    const conn = { ws: null, sb: null, queue: [], timer: null, closed: false, appends: 0, retry: null, awaitAck: null,
+      pendingSeek: fromMs > 0 ? fromMs / 1000 : null };
     this.conn = conn;
     this.stats = { ...freshStats(), requestedAt: performance.now(), fromMs };
 
@@ -96,13 +100,7 @@ export class StreamPlayer {
       this.stats.codec = codec;
       sb.addEventListener('updateend', () => {
         conn.appends++;
-        // The first append is the init segment (no timestamped media); the
-        // seekable range only exists after the second. Deferred because
-        // touching the element synchronously inside 'updateend' has crashed
-        // Chromium's media pipeline here before.
-        if (conn.appends === 2 && fromMs > 0) {
-          setTimeout(() => { if (!conn.closed) video.currentTime = fromMs / 1000; }, 0);
-        }
+        this.applyPendingSeek(conn);
         this.pump(conn);
       });
       return true;
@@ -130,10 +128,19 @@ export class StreamPlayer {
       };
       ws.onmessage = (evt) => {
         if (conn.closed) return;
+        if (typeof evt.data === 'string') {
+          // The server marks where each position's media begins. Seeks can
+          // be coalesced server-side, so only the latest one's ack counts.
+          let msg = null;
+          try { msg = JSON.parse(evt.data); } catch { /* not ours */ }
+          if (msg && msg.seek_ack === conn.awaitAck) conn.awaitAck = null;
+          return;
+        }
         if (this.onChunk) this.onChunk(evt.data);
         if (this.stats.firstByteAt == null) this.stats.firstByteAt = performance.now();
         this.stats.chunks++;
         this.stats.bytes += evt.data.byteLength;
+        if (conn.sb && conn.awaitAck != null) return; // pushed for the position we just left
         if (!conn.sb && !createSourceBuffer(evt.data)) {
           conn.closed = true;
           ws.close();
@@ -147,6 +154,29 @@ export class StreamPlayer {
         if (!conn.closed) this.onLog('disconnected');
       };
     });
+  }
+
+  // Chromium clamps a seek past the end of the buffered media to that end,
+  // and it stays there: the media for the real target arrives later and
+  // the playhead never moves to it. So a start position or seek target is
+  // (re)applied once buffered media actually covers it. Found twice by the
+  // benchmark: joins with sub-GOP chunks started up to a GOP early, and a
+  // forward seek after a long backfill froze playback for good. Deferred
+  // because touching the element synchronously inside 'updateend' has
+  // crashed Chromium's media pipeline here before.
+  applyPendingSeek(conn) {
+    const t = conn.pendingSeek;
+    if (t == null || conn.awaitAck != null) return;
+    const b = conn.sb.buffered;
+    for (let i = 0; i < b.length; i++) {
+      if (b.start(i) <= t + 0.05 && b.end(i) > t) {
+        conn.pendingSeek = null;
+        if (Math.abs(this.video.currentTime - t) > 0.25) {
+          setTimeout(() => { if (!conn.closed) this.video.currentTime = t; }, 0);
+        }
+        return;
+      }
+    }
   }
 
   pump(conn) {
@@ -163,9 +193,14 @@ export class StreamPlayer {
       }
       // Buffer full — typical when backfilling a long video from the start.
       // Keep the chunk, free what's already been watched, and try again.
+      // Only if something is actually buffered behind the playhead: a
+      // remove() over an empty range still fires updateend, which retried
+      // the append at once — a hot loop the benchmark caught at ~30,000
+      // failed appends a second once pushed-ahead media filled the quota.
       const behind = this.video.currentTime - 15;
-      if (behind > 1) {
-        conn.sb.remove(0, behind); // fires updateend → pump retries
+      const b = conn.sb.buffered;
+      if (b.length && b.start(0) < behind - 0.5) {
+        conn.sb.remove(b.start(0), behind); // fires updateend → pump retries
       } else {
         clearTimeout(conn.retry);
         conn.retry = setTimeout(() => this.pump(conn), 1000);
@@ -180,6 +215,11 @@ export class StreamPlayer {
       this.connect(ms);
       return ms;
     }
+    // Media still queued for appending was pushed for the old position;
+    // appending it first is what used to make seeks wait seconds.
+    conn.queue.length = 0;
+    conn.awaitAck = ms;
+    conn.pendingSeek = ms / 1000;
     conn.ws.send(JSON.stringify({ seek_ms: ms }));
     this.video.currentTime = ms / 1000;
     return ms;

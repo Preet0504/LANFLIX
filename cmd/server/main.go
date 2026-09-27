@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -54,15 +55,41 @@ type controlMsg struct {
 // safeConn serializes writes: when a seek arrives mid-stream, the old and
 // new stream goroutines briefly overlap before the old one notices its
 // context was cancelled, and gorilla/websocket forbids concurrent writers.
+//
+// It also numbers stream generations. Each seek starts a new epoch and
+// sends {"seek_ack": ms} ahead of the new position's media; a write from
+// an older epoch is dropped rather than sent. Cancelling the old stream's
+// context isn't enough on its own: a write that passed its context check
+// just before the cancel would still land after the new stream began.
+// The client drops whatever reaches it before the ack (bytes that were
+// already in the socket), so after a seek nothing stale is decoded — or
+// queued ahead of the new position, which is what made seeks slow: the
+// benchmark measured seeks of 1-11s with 200ms chunks, stuck behind
+// thousands of chunks the previous position had pushed.
 type safeConn struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu    sync.Mutex
+	conn  *websocket.Conn
+	epoch uint64
 }
 
-func (c *safeConn) WriteBinary(data []byte) error {
+var errStaleEpoch = errors.New("stream superseded by a newer seek")
+
+func (c *safeConn) WriteBinary(epoch uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if epoch != c.epoch {
+		return errStaleEpoch
+	}
 	return c.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// beginEpoch starts a new stream generation at fromMillis and returns it.
+func (c *safeConn) beginEpoch(fromMillis int64) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.epoch++
+	msg := fmt.Sprintf(`{"seek_ack":%d}`, fromMillis)
+	return c.epoch, c.conn.WriteMessage(websocket.TextMessage, []byte(msg))
 }
 
 func main() {
@@ -175,7 +202,7 @@ func handleWS(w http.ResponseWriter, r *http.Request, store *redisstream.Store, 
 		log.Printf("get init movie=%s: %v", movieID, err)
 		return
 	}
-	if err := conn.WriteBinary(initData); err != nil {
+	if err := conn.WriteBinary(0, initData); err != nil {
 		return
 	}
 
@@ -196,9 +223,13 @@ func handleWS(w http.ResponseWriter, r *http.Request, store *redisstream.Store, 
 			if streamCancel != nil {
 				streamCancel()
 			}
+			epoch, err := conn.beginEpoch(from)
+			if err != nil {
+				return
+			}
 			var streamCtx context.Context
 			streamCtx, streamCancel = context.WithCancel(ctx)
-			go streamFrom(streamCtx, conn, store, live, movieID, from)
+			go streamFrom(streamCtx, conn, epoch, store, live, movieID, from)
 		}
 	}
 }
@@ -736,7 +767,7 @@ func handleGetMovie(w http.ResponseWriter, r *http.Request, store *redisstream.S
 // streamFrom backfills from fromMillis then live-tails, writing every
 // chunk as a binary WS frame, until ctx is cancelled (client disconnected
 // or a newer seek superseded this one).
-func streamFrom(ctx context.Context, conn *safeConn, store *redisstream.Store, live *hub, movieID string, fromMillis int64) {
+func streamFrom(ctx context.Context, conn *safeConn, epoch uint64, store *redisstream.Store, live *hub, movieID string, fromMillis int64) {
 	// Subscribe before backfilling: the live feed then overlaps the backfill
 	// rather than leaving a gap between them. Overlap is skipped by ID below.
 	sub, unsubscribe, err := live.subscribe(movieID)
@@ -752,10 +783,10 @@ func streamFrom(ctx context.Context, conn *safeConn, store *redisstream.Store, l
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return conn.WriteBinary(c.Data)
+		return conn.WriteBinary(epoch, c.Data)
 	})
 	if err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil && !errors.Is(err, errStaleEpoch) {
 			log.Printf("backfill movie=%s from_ms=%d: %v", movieID, fromMillis, err)
 		}
 		return
@@ -770,9 +801,9 @@ func streamFrom(ctx context.Context, conn *safeConn, store *redisstream.Store, l
 			// from exactly where this viewer is, so nothing is skipped.
 			unsubscribe()
 			err := store.Tail(ctx, movieID, lastID, func(id string, c redisstream.Chunk) error {
-				return conn.WriteBinary(c.Data)
+				return conn.WriteBinary(epoch, c.Data)
 			})
-			if err != nil && ctx.Err() == nil {
+			if err != nil && ctx.Err() == nil && !errors.Is(err, errStaleEpoch) {
 				log.Printf("tail movie=%s: %v", movieID, err)
 			}
 			return
@@ -780,7 +811,7 @@ func streamFrom(ctx context.Context, conn *safeConn, store *redisstream.Store, l
 			if !idAfter(lc.id, lastID) {
 				continue // already sent during backfill
 			}
-			if err := conn.WriteBinary(lc.data); err != nil {
+			if err := conn.WriteBinary(epoch, lc.data); err != nil {
 				return
 			}
 			lastID = lc.id

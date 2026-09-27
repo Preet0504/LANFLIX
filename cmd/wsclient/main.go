@@ -50,10 +50,14 @@ func main() {
 	start := time.Now()
 	first := true
 	for {
-		_, data, err := conn.ReadMessage()
+		kind, data, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("closed: %v", err)
 			return
+		}
+		if kind == websocket.TextMessage {
+			log.Printf("control: %s", data) // {"seek_ack":ms}, sent ahead of each new position's media
+			continue
 		}
 		if first {
 			log.Printf("time-to-first-frame: %s", time.Since(start))

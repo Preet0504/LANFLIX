@@ -23,8 +23,9 @@ export const B = (window.__bench = {
   done: false,
 });
 
+// The lite timeline: ids, live edges and the WebRTC clock anchor only.
 export async function timeline() {
-  const r = await fetch('/timeline', { cache: 'no-store' });
+  const r = await fetch('/timeline?lite=1', { cache: 'no-store' });
   return r.json();
 }
 
@@ -32,7 +33,10 @@ export function markReceipt(n) {
   if (Number.isInteger(n) && n >= 0 && !(n in B.receipts)) B.receipts[n] = wall();
 }
 
-export function instrument(video) {
+// mediaTimeOf maps a frame's metadata to seconds on the shared media
+// timeline. MSE players report it directly; WebRTC has no media timeline,
+// so its page maps the frame's RTP timestamp instead.
+export function instrument(video, { mediaTimeOf = (meta) => meta.mediaTime } = {}) {
   let waitingAt = null;
   video.addEventListener('waiting', () => {
     // Only steady-state playback counts: startup buffering is TTFF, and
@@ -50,11 +54,14 @@ export function instrument(video) {
   // the closest a browser gets to "photons on screen".
   const onFrame = (_now, meta) => {
     const shownAt = performance.timeOrigin + meta.presentationTime;
-    if (B.ttffMs == null && B.tStart != null) {
-      B.ttffMs = shownAt - B.tStart;
-      B.firstMediaTime = meta.mediaTime;
+    const m = mediaTimeOf(meta);
+    if (m != null) {
+      if (B.ttffMs == null && B.tStart != null) {
+        B.ttffMs = shownAt - B.tStart;
+        B.firstMediaTime = m;
+      }
+      B.frames.push([shownAt, m]);
     }
-    B.frames.push([shownAt, meta.mediaTime]);
     video.requestVideoFrameCallback(onFrame);
   };
   video.requestVideoFrameCallback(onFrame);
@@ -79,7 +86,7 @@ async function frameNear(targetS, afterMs, timeoutMs) {
 
 // Protocol shared by every page: wait for first frame, sample steady-state
 // playback, then seek to the same pseudo-random points in the DVR window.
-export async function protocol({ seek, sampleS = 15, seeks = 4 }) {
+export async function protocol({ seek, sampleS = 15, seeks = 4, beforeDone = null }) {
   const t0 = wall();
   while (B.ttffMs == null && wall() - t0 < 25000) await sleep(20);
   if (B.ttffMs == null) { B.errors.push('no first frame within 25s'); B.done = true; return; }
@@ -89,15 +96,18 @@ export async function protocol({ seek, sampleS = 15, seeks = 4 }) {
   B.sampleEnd = wall();
 
   const tl = await timeline();
-  const edgeS = (Math.max(...Object.keys(tl.ours).map(Number)) * tl.gop_ms) / 1000;
+  const edgeS = (tl.ours_edge * tl.gop_ms) / 1000;
   const rand = rng(B.trial * 7919 + 17);
-  for (let i = 0; i < seeks && edgeS > 30; i++) {
+  for (let i = 0; seek && i < seeks && edgeS > 30; i++) {
     const target = 5 + rand() * (edgeS - 25);
     const start = wall();
     seek(target);
     const shown = await frameNear(target, start, 15000);
     B.seeks.push({ target, ms: shown == null ? null : shown - start });
     await sleep(1500);
+  }
+  if (beforeDone) {
+    try { await beforeDone(); } catch (e) { B.errors.push('beforeDone: ' + e.message); }
   }
   B.done = true;
 }

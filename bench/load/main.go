@@ -45,7 +45,7 @@ type stepResult struct {
 	P50, P95     float64
 	P99, Max     float64
 	Received     int     `json:"segments_received"`
-	Expected     int     `json:"segments_expected"` // published before the window closed
+	Expected     int     `json:"segments_expected"`  // published before the window closed
 	Delivered    int     `json:"segments_delivered"` // of those, how many every client got
 	Mismatches   int     `json:"hash_mismatches"`
 	ConnectFails int     `json:"connect_failures"`

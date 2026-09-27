@@ -10,11 +10,11 @@ func TestIDAfter(t *testing.T) {
 		a, b string
 		want bool
 	}{
-		{"10000-6", "8000-5", true},  // string order would say false
+		{"10000-6", "8000-5", true}, // string order would say false
 		{"8000-5", "10000-6", false},
-		{"8000-5", "8000-5", false},  // the same chunk is not "after" itself
-		{"8000-6", "8000-5", true},   // same ms, higher seq
-		{"0-1", "0-0", true},         // first chunk vs "nothing yet"
+		{"8000-5", "8000-5", false}, // the same chunk is not "after" itself
+		{"8000-6", "8000-5", true},  // same ms, higher seq
+		{"0-1", "0-0", true},        // first chunk vs "nothing yet"
 		{"2000-2", "0-0", true},
 	}
 	for _, c := range cases {

@@ -12,17 +12,31 @@ instrument(video);
 
 // tuned=1: the most aggressive standard (non-LL) setting — start one
 // segment behind the live edge instead of hls.js's default three.
+// ll=1: Low-Latency HLS from the LL origin (200ms parts, blocking reload,
+// preload hints, delta updates), hls.js in lowLatencyMode — its defaults
+// otherwise, so it follows the playlist's PART-HOLD-BACK.
 const tuned = q.get('tuned') === '1';
-const hls = new Hls(tuned ? { liveSyncDurationCount: 1 } : {});
-B.config = tuned ? 'liveSyncDurationCount=1' : 'hls.js defaults';
+const ll = q.get('ll') === '1';
+const hls = new Hls(ll ? { lowLatencyMode: true } : tuned ? { liveSyncDurationCount: 1 } : {});
+B.config = ll ? 'LL-HLS, hls.js lowLatencyMode' : tuned ? 'liveSyncDurationCount=1' : 'hls.js defaults';
 
 hls.on(Hls.Events.FRAG_LOADED, (_e, d) => {
-  if (d.frag.type === 'main' && typeof d.frag.sn === 'number') markReceipt(d.frag.sn);
+  if (d.frag.type !== 'main') return;
+  if (ll) {
+    // Parts are named by the fragment they carry (part<n>.mp4). Whole
+    // segments are only fetched when not near the live edge (after a
+    // seek), outside the steady-state window delivery is measured in.
+    const m = d.part && /part(\d+)\.mp4/.exec(d.part.relurl || d.part.url || '');
+    if (m) markReceipt(Number(m[1]));
+    else if (!d.part) B.fullSegments = (B.fullSegments || 0) + 1; // counted for bandwidth only
+  } else if (typeof d.frag.sn === 'number') {
+    markReceipt(d.frag.sn);
+  }
 });
 hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) B.errors.push(`${d.type}: ${d.details}`); });
 
 B.tStart = wall();
-hls.loadSource('/out/hls/index.m3u8');
+hls.loadSource(ll ? '/out/llhls/index.m3u8' : '/out/hls/index.m3u8');
 hls.attachMedia(video);
 video.play().catch((e) => B.errors.push('play: ' + e.message));
 

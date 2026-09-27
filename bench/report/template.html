@@ -94,7 +94,9 @@ svg text { font-family: var(--sans); }
 
 /* comparison matrix */
 .matrix th, .matrix td { padding: 9px 10px; }
-.matrix td:first-child { font-weight: 500; }
+.matrix td:first-child { font-weight: 500; min-width: 170px; }
+.matrix .mk { white-space: normal; align-items: flex-start; }
+.matrix .mk svg { flex: none; margin-top: 2px; }
 .matrix .sub { display: block; color: var(--ink-3); font-size: 12px; font-weight: 400; margin-top: 2px; }
 .mk { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; white-space: nowrap; }
 .mk.y { color: var(--good); } .mk.n { color: var(--bad); } .mk.p { color: var(--part); }
@@ -111,8 +113,8 @@ ul { padding-left: 20px; }
 <div class="page">
   <header class="col">
     <div class="eyebrow">Benchmark report · LAN video delivery</div>
-    <h1>Push beats poll: Redis Streams + WebSocket vs HLS and DASH on a local network</h1>
-    <p class="lede">One encoder, three delivery systems, identical bytes. We measured how fast each gets a viewer to the first frame, how close to real time they play, how quickly each new segment reaches the viewer, and what happens under load and packet loss.</p>
+    <h1>Push, poll or peer-to-peer: LANFLIX against HLS, LL-HLS, DASH and WebRTC on a local network</h1>
+    <p class="lede">One encoder, eight delivery configurations, identical video. We measured how fast each gets a viewer to the first frame, how close to real time it plays, how quickly new media reaches the viewer, what seeking costs, and what happens under load and packet loss.</p>
     <p class="byline" id="byline"></p>
   </header>
 
@@ -120,30 +122,37 @@ ul { padding-left: 20px; }
 
   <section class="col">
     <h2><span class="num">1</span>Summary</h2>
-    <p>On a LAN, the bottleneck in live streaming is not bandwidth, it's <em>discovery</em>: how a player finds out a new segment exists. HLS and DASH players poll a playlist or compute availability from a clock; our system (LANFLIX) pushes each segment down an open WebSocket the moment Redis has it.</p>
-    <p>That shows up exactly where you'd expect. New segments reach our viewers a median of <span class="b" data-v="ours.delivery.median|ms"></span> after they exist, versus <span class="b" data-v="hls.delivery.median|ms"></span> for HLS and <span class="b" data-v="dash.delivery.median|ms"></span> for DASH. Our first frame appears in <span class="b" data-v="ours.ttff.median|ms"></span> (HLS <span class="b" data-v="hls.ttff.median|ms"></span>, DASH <span class="b" data-v="dash.ttff.median|ms"></span>), and viewers play <span class="b" data-v="ours.latency.median|s"></span> behind real time (HLS <span class="b" data-v="hls.latency.median|s"></span> with defaults, <span class="b" data-v="hls-tuned.latency.median|s"></span> tuned).</p>
-    <p>It is not a clean sweep, and this report says so. <strong>Seeking is where we lose</strong>: <span class="b" data-v="ours.seek.median|ms"></span> median against <span class="b" data-v="hls.seek.median|ms"></span> for HLS. Both are imperceptible, but the cause is a real design flaw: after a seek we push everything up to the live edge, which also wastes bandwidth. HLS and DASH also win on everything the open internet needs: adaptive bitrate, CDN caching, native iPhone playback. And the benchmark exposed three bugs in our server, fixed before these numbers were taken (<a href="#found">§8</a>).</p>
+    <p>LANFLIX pushes video chunks from Redis Streams down one WebSocket per viewer. We compared it with the protocols a LAN streaming app could use instead: classic HLS and DASH, which poll; Low-Latency HLS, which uses long-held HTTP requests; and WebRTC, which sends RTP packets and was built for calls.</p>
+    <p><strong>WebRTC wins live latency by a wide margin:</strong> <span class="b" data-v="webrtc.latency.median|ms"></span> glass-to-glass, against <span class="b" data-v="ll-hls.latency.median|ms"></span> for the best segment-based system. It cannot seek, rewind or resume, and a joining viewer waits for the next keyframe (<span class="b" data-v="webrtc.ttff.median|ms"></span> to first frame here).</p>
+    <p><strong>At equal chunk sizes, LANFLIX and LL-HLS reach near parity on latency</strong>: <span class="b" data-v="ours-ll.latency.median|ms"></span> against <span class="b" data-v="ll-hls.latency.median|ms"></span>, with LL-HLS slightly ahead. Both get new media to the viewer in milliseconds, because hls.js requests each part before it exists and the origin holds the request open. LANFLIX gets there with one socket and reaches the first frame in <span class="b" data-v="ours-ll.ttff.median|ms"></span> (LL-HLS: <span class="b" data-v="ll-hls.ttff.median|ms"></span>). LL-HLS spends about <span class="b" data-v="ll-hls.requests_per_min.median|int"></span> HTTP requests per viewer per minute.</p>
+    <p><strong>At 2&nbsp;s segments, push does not lower glass-to-glass latency.</strong> LANFLIX plays <span class="b" data-v="ours.latency.median|s2"></span> behind live against <span class="b" data-v="hls-tuned.latency.median|s2"></span> for tuned HLS; the per-trial ranges overlap. Latency is set by chunk size and hold-back, not by how discovery works. What push does win at 2&nbsp;s is getting each new segment to the viewer in <span class="b" data-v="ours.delivery.median|ms"></span> instead of <span class="b" data-v="hls.delivery.median|ms"></span>, and a first frame in <span class="b" data-v="ours.ttff.median|ms"></span>.</p>
+    <p>LANFLIX loses on <strong>seeking</strong> (<span class="b" data-v="ours.seek.median|ms"></span> against <span class="b" data-v="hls.seek.median|ms"></span> for HLS) and on <strong>bandwidth</strong>: after a seek it pushes everything to the live edge, downloading about five times more media per session. Adding WebRTC and LL-HLS also exposed four bugs in the LANFLIX player and server, fixed before these numbers were taken (<a href="#found">§8</a>).</p>
   </section>
 
   <section>
     <div class="col">
       <h2><span class="num">2</span>Setup</h2>
-      <p>A single ffmpeg process encodes a looping 720p30 test source in real time (H.264 High, 2&nbsp;s GOP with keyframes only on segment boundaries, AAC 128&nbsp;kb/s) and <strong>tees the encoded packets to all three systems at once</strong>. Every system receives bit-identical frames at the same instant, so every difference measured below is delivery, not encoding.</p>
+      <p>A single ffmpeg process encodes a looping 720p30 test source in real time: H.264 High with no B-frames, a keyframe every 2&nbsp;s, and AAC audio. It <strong>tees the encoded packets to every system at once</strong>, so every difference measured below is delivery, not encoding. There are no B-frames because WebRTC cannot carry them, and low-latency live encoders don't use them. WebRTC's audio is a second, Opus encode of the same source, because WebRTC cannot carry AAC.</p>
     </div>
     <figure>
       <pre class="mermaid">
 flowchart LR
-  SRC["Source clip<br/>(looped, real time)"] --> ENC["ffmpeg<br/>one x264 + AAC encoder"]
-  ENC -- "fMP4 on stdout" --> DMX["Production demuxer"] --> RS[("Redis Streams")] --> HUB["Server fan-out hub"] -- "WebSocket push" --> V1["Ours · production player"]
-  ENC -- "HTTP PUT" --> H["HLS origin<br/>EVENT playlist"] -- "poll + GET" --> V2["hls.js 1.7.3"]
-  ENC -- "HTTP PUT" --> D["DASH origin<br/>dynamic MPD"] -- "GET by template" --> V3["dash.js 5.2.1"]
+  ENC["ffmpeg<br/>one x264 encoder"]
+  ENC -- "fMP4, 2 s" --> DMX["Production demuxer"] --> RS[("Redis Streams")] --> SRV["LANFLIX server"] -- "WebSocket push" --> V1["LANFLIX player"]
+  ENC -- "fMP4, 200 ms" --> DMX2["Fragment demuxer"]
+  DMX2 --> RS2[("Redis Streams")] --> SRV
+  DMX2 --> LL["LL-HLS origin<br/>parts, blocking reload"] --> V3["hls.js, low-latency"]
+  ENC -- "HTTP PUT" --> H["HLS / DASH origin"] -- "poll + GET" --> V2["hls.js · dash.js"]
+  ENC -- "RTP" --> P["pion relay"] -- "WebRTC" --> V4["Chrome WebRTC"]
       </pre>
-      <figcaption><b>Figure 1.</b> Test harness. HLS and DASH are ingested over HTTP into an in-memory origin, as production origins ingest; our side runs the production demuxer, Redis, server and player code unmodified.</figcaption>
+      <figcaption><b>Figure 1.</b> Test harness. The 200&nbsp;ms stream is demuxed once, and each chunk goes to both LANFLIX-LL and the LL-HLS origin at the same instant. LANFLIX runs its production demuxer, Redis store, server and player code unmodified.</figcaption>
     </figure>
     <div class="col">
-      <p>Five configurations were measured. HLS and DASH each ran twice: with the players' defaults, and <strong>tuned</strong> to the most aggressive standard (non-low-latency) setting, so our results are compared against the best these protocols can do without LL-HLS/LL-DASH.</p>
+      <p>Eight configurations were measured:</p>
       <div class="tw"><table id="configTable"></table></div>
-      <p>Each configuration ran <span class="b" data-v="meta.trials"></span> trials in headless Edge (Chromium), interleaved round-robin so drift in machine load can't favor any one system, each in a fresh browser profile. A trial joins at the live edge, plays 15&nbsp;s, then seeks to four pseudo-random points in the stream history (the same points for every system in a given trial). Frame timing comes from <code>requestVideoFrameCallback</code>, which reports when a frame was actually presented on screen, not merely decoded. Client and origin share one machine and one clock, so per-segment delays are measured directly rather than estimated.</p>
+      <p>Each configuration ran <span class="b" data-v="meta.trials"></span> trials in headless Edge (Chromium). Trials were interleaved round-robin so drift in machine load can't favor any one system, each in a fresh browser profile, after a seeded random 0–2&nbsp;s wait. That wait matters. Without it, one round of sessions took an almost constant 146&nbsp;s (exactly 73 segments), so every system joined at the same point of the segment cycle in every trial. An earlier run's latency ranking was an artifact of that.</p>
+      <p>A trial joins at the live edge, plays 15&nbsp;s, then seeks to four pseudo-random points in the stream history (the same points for every system in a given trial). Frame timing comes from <code>requestVideoFrameCallback</code>, which reports when a frame was actually presented.</p>
+      <p>The encoder's clock comes from its RTP output, which leaves ffmpeg as soon as each frame is encoded: the 1st percentile of arrival minus timestamp over <span data-v="meta.encoder_clock.frames|int"></span> frames. A plain minimum was wrong, because at each loop of the source ffmpeg releases a few frames early. As a check, no 200&nbsp;ms chunk becomes available before its last frame is encoded (1st percentile <span data-v="meta.fragment_available_after_encode_ms.p1|ms"></span> after).</p>
     </div>
   </section>
 
@@ -151,97 +160,110 @@ flowchart LR
     <div class="col"><h2><span class="num">3</span>Latency</h2></div>
 
     <div class="col"><h3><span class="num">3.1</span>Time to first frame</h3>
-      <p>From telling the player to start at the live edge until its first frame is on screen. Ours needs one round trip: the socket opens and the newest segment arrives with the init segment. hls.js fetches a playlist, then an init segment, then media; dash.js fetches and parses an MPD first.</p></div>
+      <p>From telling the player to start at the live edge until its first frame is on screen. LANFLIX needs one round trip: the socket opens, and the init segment and newest chunk arrive together. hls.js fetches a playlist, then an init segment, then media; dash.js fetches and parses an MPD first.</p>
+      <p>WebRTC connects in <span class="b" data-v="webrtc.webrtc.connect_ms.median|ms"></span>, then waits for the next keyframe. A dedicated WebRTC encoder would send one on request; this shared encoder keeps its fixed 2&nbsp;s schedule, so the result is pessimistic for WebRTC.</p></div>
     <figure><div class="fig" id="fTtff"></div>
       <figcaption><b>Figure 2.</b> Time to first frame, one dot per trial; the vertical tick is the median. Lower is better.</figcaption></figure>
 
     <div class="col"><h3><span class="num">3.2</span>Delay behind real time</h3>
-      <p>Glass-to-glass: for every frame presented during steady playback, the time since the encoder produced it. HLS's default holds three segments back (about 6&nbsp;s) for safety; its tuned setting and ours both start one segment behind. What's left over after that is delivery.</p></div>
+      <p>Glass-to-glass: for every frame presented during steady playback, the time since the encoder produced it. Segment-based systems hold back at least one chunk plus a safety margin: default HLS holds three 2&nbsp;s segments, and tuned HLS and LANFLIX hold one. The low-latency pair holds 0.6&nbsp;s. WebRTC holds only its jitter buffer (<span data-v="webrtc.webrtc.jitter_buffer_ms.median|ms"></span> on average here).</p></div>
     <figure><div class="fig" id="fLatency"></div>
-      <figcaption><b>Figure 3.</b> Median glass-to-glass delay per trial. Lower is better. dash.js also stalled in every run: 1–4 times per 15&nbsp;s window by default, 4–5 times tuned. Ours and default HLS never stalled; tuned HLS, holding only one segment of buffer, stalled 4 times in 1 of 10 runs. Includes the unavoidable one-segment (2&nbsp;s) hold every non-low-latency system needs; the encoder's startup time (<span data-v="meta.encoder_startup_ms|ms"></span>) is calibrated out for all systems equally.</figcaption></figure>
+      <figcaption><b>Figure 3.</b> Median glass-to-glass delay per trial, log scale. Lower is better. Within the 2&nbsp;s systems, the spread is where in the segment cycle a viewer happened to join.</figcaption></figure>
 
-    <div class="col"><h3><span class="num">3.3</span>New-segment delivery: push versus poll</h3>
-      <p>The purest measure of the architecture: once a new segment exists at the origin, how long until the viewer has its bytes? Ours is pushed the moment Redis stores it. An HLS player only notices after its next playlist refresh; a DASH player requests on a schedule computed from the manifest's clock.</p></div>
+    <div class="col"><h3><span class="num">3.3</span>New-media delivery: push versus poll</h3>
+      <p>Once a new chunk exists at the origin, how long until the viewer has its bytes? LANFLIX pushes each chunk the moment Redis stores it. A classic HLS player only notices after its next playlist refresh; a DASH player requests on a schedule computed from the manifest's clock.</p>
+      <p>LL-HLS closes this gap by requesting the next part in advance (a preload hint) and having the origin hold the request until the part exists. That is push built out of HTTP requests.</p></div>
     <figure><div class="fig" id="fCdf"></div>
-      <figcaption><b>Figure 4.</b> Cumulative distribution of per-segment delivery delay across all trials: the curve reaching 100% soonest is fastest. Log scale: ours is measured in milliseconds, polling in hundreds of them. Hover to read every system's delay at a given percentile.</figcaption></figure>
+      <figcaption><b>Figure 4.</b> 2&nbsp;s segments: cumulative distribution of per-segment delivery delay across all trials. The curve that reaches 100% soonest is fastest. Log scale; dashed lines are tuned variants.</figcaption></figure>
+    <figure><div class="fig" id="fCdfLL"></div>
+      <figcaption><b>Figure 5.</b> 200&nbsp;ms chunks: the same measure for the low-latency pair, fed identical chunks at the same instant.</figcaption></figure>
 
-    <div class="col"><h3><span class="num">3.4</span>Seeking inside the stream history</h3>
-      <p>The one latency measure we lose. All three are well under the ~100&nbsp;ms where a seek starts to feel slow, but ours is measurably slower, and it gets slower with each successive seek in a session (median <span class="b" id="seekByPos"></span> for seeks 1–4, while HLS stays flat). Two causes, both ours to fix: the server reads a page of four segments (~2.4&nbsp;MB) from Redis before sending the first, and, because a seek pushes <em>everything</em> up to the live edge (§4.2), the next seek's segment queues behind megabytes still in flight. An earlier version was worse still: it read the entire history before sending anything (<a href="#found">§8</a>).</p></div>
+    <div class="col"><h3><span class="num">3.4</span>Freezes</h3>
+      <p>Gaps of more than 250&nbsp;ms between presented frames during steady playback, measured from the frames themselves so the measure is identical for every player. Only dash.js froze regularly, and more often when tuned for low delay.</p></div>
+    <figure><div class="fig" id="fFreeze"></div>
+      <figcaption><b>Figure 6.</b> Mean freezes per 15&nbsp;s of steady playback. Lower is better.</figcaption></figure>
+
+    <div class="col"><h3><span class="num">3.5</span>Seeking inside the stream history</h3>
+      <p>Seek latency is where LANFLIX loses. All of these are well under the ~100&nbsp;ms where a seek starts to feel slow, but LANFLIX is about twice as slow as HLS: HLS fetches exactly the segment it needs, while LANFLIX restarts a Redis read and a stream. Median seeks 1–4 in a session: <span class="b" id="seekByPos"></span>.</p>
+      <p>Before the seek-epoch fix (<a href="#found">§8</a>), seeks with 200&nbsp;ms chunks took up to 11&nbsp;s, stuck behind data pushed for the previous position.</p></div>
     <figure><div class="fig" id="fSeek"></div>
-      <figcaption><b>Figure 5.</b> Seek latency, issue to first frame near the target presented, one dot per seek. Lower is better. Very low values mean the target was already buffered.</figcaption></figure>
+      <figcaption><b>Figure 7.</b> Seek latency, from issue to the first frame near the target presented, one dot per seek. Lower is better. WebRTC cannot seek.</figcaption></figure>
   </section>
 
   <section>
     <div class="col"><h2><span class="num">4</span>Cost</h2>
       <h3><span class="num">4.1</span>Requests to the origin</h3>
-      <p>Polling has a price paid by the server, per viewer, forever: every HLS viewer re-fetches the playlist every couple of seconds even when nothing changed. Ours opens one socket per session; seeks and position reports ride on it.</p></div>
+      <p>Polling has a price paid by the server, per viewer, for as long as they watch. Every HLS viewer re-fetches the playlist every couple of seconds even when nothing has changed. LL-HLS triples that: a blocking playlist request plus a part request for every 200&nbsp;ms of video. LANFLIX and WebRTC make one connection per session.</p></div>
     <figure><div class="fig" id="fReq"></div>
-      <figcaption><b>Figure 6.</b> HTTP requests per viewer per minute of watching (median of trials), counted at the origin. Ours: the single WebSocket upgrade.</figcaption></figure>
+      <figcaption><b>Figure 8.</b> HTTP requests per viewer per minute of watching (median of trials), counted at the origin. For LANFLIX and WebRTC this is a single request per session, so the per-minute figure only reflects the ~25&nbsp;s test sessions.</figcaption></figure>
 
-    <div class="col"><h3><span class="num">4.2</span>Segments fetched per session</h3>
-      <p>The flip side, and a real weakness: after a seek, our server pushes <em>every</em> segment from the seek point up to the live edge, while hls.js stops at a 30-second buffer. A session that seeks far back pulls far more data than it will watch. The fix is flow control (the client asks for the next window as it plays), not yet built.</p></div>
+    <div class="col"><h3><span class="num">4.2</span>Media downloaded per session</h3>
+      <p>The flip side, and a real weakness. After a seek, LANFLIX's server pushes <em>every</em> chunk from the seek point to the live edge, while hls.js stops at about a 30-second buffer. A session that seeks far back pulls far more data than it will ever watch. The fix is flow control (the client grants the server credit as it plays), which is not built yet.</p></div>
     <figure><div class="fig" id="fSegs"></div>
-      <figcaption><b>Figure 7.</b> Segments (2&nbsp;s each) downloaded per 15&nbsp;s trial with four seeks, median. Lower is better.</figcaption></figure>
+      <figcaption><b>Figure 9.</b> Seconds of media downloaded per 15&nbsp;s trial with four seeks, median. Lower is better.</figcaption></figure>
   </section>
 
   <section>
     <div class="col"><h2><span class="num">5</span>Scaling to many viewers</h2>
-      <p>N concurrent viewers join our origin at the live edge; for each new segment we record when every viewer received it, and SHA-256-check every byte against what was published. The load generator and the server share one 8-core machine and loopback, so this measures our software, not a network.</p>
-      <p>The first run found a real flaw. Each viewer held its own blocking Redis read, each tying up a connection from a pool of 80; past 80 viewers the rest queued, and Redis sat at 81 blocked clients. We replaced it with a <strong>fan-out hub</strong>: one Redis tail per movie, broadcast in-process to every viewer. Redis work now scales with the number of streams, not viewers.</p></div>
+      <p>N concurrent viewers join LANFLIX's origin at the live edge. For each new segment we record when every viewer received it, and SHA-256-check every byte against what was published. The load generator and the server share one 8-core machine and loopback, so this measures the software, not a network. This test predates the encoder change and the seek protocol; the live fan-out path it measures is unchanged apart from a per-write epoch check.</p>
+      <p>The first run found a real flaw. Each viewer held its own blocking Redis read, each tying up a connection from a pool of 80. Past 80 viewers the rest queued, and Redis sat at 81 blocked clients. We replaced it with a <strong>fan-out hub</strong>: one Redis tail per movie, broadcast in-process to every viewer. Redis work now scales with the number of streams, not viewers.</p></div>
     <figure><div class="fig" id="fScale"></div>
-      <figcaption><b>Figure 8.</b> Median delay from publish to receipt versus concurrent viewers, before and after the fan-out hub. At 200 viewers the server pushes <span data-v="load.last.aggregate_mbps|mbps"></span>, more than most Wi-Fi networks can carry; past that point, the LAN is the limit, not the server.</figcaption></figure>
+      <figcaption><b>Figure 10.</b> Median delay from publish to receipt versus concurrent viewers, before and after the fan-out hub. At 200 viewers the server pushes <span data-v="load.last.aggregate_mbps|mbps"></span>, more than most Wi-Fi networks can carry. Past that point, the LAN is the limit, not the server.</figcaption></figure>
     <figure><div class="fig" id="fCpu"></div>
-      <figcaption><b>Figure 9.</b> Server CPU (percent of one core) versus concurrent viewers.</figcaption></figure>
+      <figcaption><b>Figure 11.</b> Server CPU (percent of one core) versus concurrent viewers.</figcaption></figure>
     <div class="col"><p><strong>Integrity:</strong> across every load step, <span class="b" data-v="load.delivered|int"></span> of <span class="b" data-v="load.expected|int"></span> expected segment deliveries arrived, with <span class="b" data-v="load.mismatches|int"></span> hash mismatches.</p></div>
   </section>
 
   <section>
     <div class="col"><h2><span class="num">6</span>Packet loss</h2>
       <p>This project began as a comparison with raw UDP streaming, the multicast-style approach that sends each packet once to everyone. We streamed the same clip as MPEG-TS over UDP through a receiver that drops a controlled share of datagrams, then counted what no longer decodes.</p>
-      <p class="callout">Read this section carefully. It does <strong>not</strong> show ours beating HLS or DASH on loss. All three run over TCP, which retransmits: on a lossy link their bytes still arrive intact, just later. The comparison here is TCP delivery versus UDP delivery, and we did not inject loss into the TCP systems (the test host has no kernel-level loss emulator). What we did verify is that our delivery is byte-exact: every segment in the load test matched its published SHA-256.</p></div>
+      <p class="callout">Read this section carefully. It compares raw UDP against protocols that recover from loss: TCP for LANFLIX, HLS and DASH, and retransmission plus a jitter buffer for WebRTC. We did not inject loss into any benchmarked system (the test host has no kernel-level loss emulator), so this does not rank those systems against each other under loss.</p></div>
     <figure><div class="fig" id="fUdp"></div>
-      <figcaption><b>Figure 10.</b> Video frames that fail to decode entirely versus datagram loss rate. Most damage is worse than this curve shows: corrupted-but-decodable frames smear artifacts until the next keyframe (see decoder errors in the data table), UDP / MPEG-TS, <span data-v="udp.secs"></span>-second clip. UDP also has no way to recover the past: a viewer who joins late simply never receives what was sent before.</figcaption></figure>
+      <figcaption><b>Figure 12.</b> Video frames that fail to decode entirely, versus datagram loss rate (UDP / MPEG-TS, <span data-v="udp.secs"></span>-second clip). Most damage is worse than this curve shows: corrupted but decodable frames smear artifacts until the next keyframe (see the decoder errors in the data table). UDP also cannot recover the past: a viewer who joins late never receives what was sent before.</figcaption></figure>
   </section>
 
   <section>
     <div class="col"><h2><span class="num">7</span>Where each system wins</h2>
-      <p>Measured results from this study, plus capabilities that follow from each protocol's design. "Partial" means possible with extra work or a newer protocol variant not tested here.</p></div>
+      <p>Measured results from this study, plus capabilities that follow from each protocol's design.</p></div>
     <div class="tw"><table class="matrix" id="matrix"></table></div>
+    <div class="col"><p><strong>Which to use.</strong> For a live, interactive stream (a watch party with voice, a camera, a game), use WebRTC. For a LAN library that people rewind, resume, join late and scrub, LANFLIX's design fits: server-side resume, per-viewer analytics, one socket per viewer and the fastest startup, and in low-latency mode it matches LL-HLS on latency. For the internet, iPhones or CDNs, use HLS or LL-HLS.</p></div>
   </section>
 
   <section class="col" id="found">
     <h2><span class="num">8</span>What the benchmark fixed</h2>
-    <p>Running the benchmark before writing it up changed the product. Each of these was found by a measurement, fixed, and re-measured; the numbers above are from the fixed code.</p>
+    <p>Running the benchmark before writing it up changed the product. Each of these was found by a measurement, fixed and re-measured; the numbers above are from the fixed code.</p>
     <ul class="found">
-      <li><strong>Seek read the whole history first.</strong> A seek loaded every segment from the target to the live edge out of Redis before sending byte one (about 24&nbsp;MB for 40 segments). Now paged and sent as it is read. That removed the worst case, but seeks are still slower than HLS for the reasons in §3.4.</li>
-      <li><strong>Redis connections per viewer.</strong> Every viewer held a blocking read; the connection pool capped at 80. Replaced with a per-movie fan-out hub: Redis blocked connections at 200 viewers went from 81 to 2 (one per movie, plus the benchmark origin's own), and server CPU from 31% to 12% of a core.</li>
-      <li><strong>Hardcoded codec string.</strong> The player declared H.264 level 3.0 for every stream; 720p is 3.1 and 1080p is 4.x, and Chrome merely tolerated it. It now reads the real profile and level, and whether audio exists, from the stream's init segment.</li>
+      <li><strong>Viewers started up to 2&nbsp;s behind the requested point.</strong> Chromium clamps a seek past the end of buffered media to that end. With one chunk per GOP the first chunk always covered the start point, which hid this. With 200&nbsp;ms chunks the server starts at the preceding keyframe, and the player landed there instead. The player now applies a start or seek position once buffered media covers it.</li>
+      <li><strong>Seeks stuck behind stale pushed data, up to 11&nbsp;s.</strong> After a far-back seek, the previous position's backfill (thousands of 200&nbsp;ms chunks) was still queued in the player and in flight on the socket. Fixed with seek epochs: the server drops writes from superseded streams and sends a <code>seek_ack</code> marker, and the player clears its queue and drops anything before it. There is a regression test.</li>
+      <li><strong>A CPU-burning retry loop.</strong> Once pushed-ahead media filled the browser's buffer quota, the player "freed" an empty range, which retried the append at once: about 30,000 failed appends a second. It now evicts only what is actually behind the playhead, and otherwise waits.</li>
+      <li><strong>A frozen forward seek.</strong> After a long backfill, a seek toward live was clamped (the first bug again) and playback never resumed. Fixed by the same change.</li>
+      <li><strong>Earlier:</strong> seeks read the whole history before sending anything; each viewer held its own Redis connection, capped at 80 (now one per movie, and CPU at 200 viewers went from 31% to 12% of a core); the codec string was hard-coded to H.264 level 3.0; and encoding froze after about 8 minutes because ffmpeg's progress output filled a pipe (a regression test reproduces it).</li>
     </ul>
-    <p>Earlier in the same session, testing with real 8–10 minute uploads also caught encoding freezing after about 8 minutes (ffmpeg's progress output silently filled a pipe), fixed with a regression test that reproduces it.</p>
+    <p>The harness needed two fixes too: the encoder clock calibration (§2) and the randomized join timing (§2). Both changed results, and both runs affected were discarded.</p>
   </section>
 
   <section class="col">
     <h2><span class="num">9</span>Limitations</h2>
     <ul>
-      <li><strong>One machine, loopback.</strong> Client, server and origin share a host, so absolute times are optimistic for a real Wi-Fi network (which adds a few ms and jitter to every system alike). Relative ordering is what these results support.</li>
-      <li><strong>Not tested against low-latency variants.</strong> LL-HLS (blocking playlist reload, partial segments) and LL-DASH (chunked CMAF) exist to attack exactly the polling delay measured in §3.3, and would narrow the gap considerably. We compared against standard HLS/DASH, tuned.</li>
-      <li><strong>No loss on TCP.</strong> See §6: loss was only applied to UDP.</li>
-      <li><strong>Synthetic source.</strong> A test pattern, 720p30, one bitrate. No adaptive bitrate was involved on any side.</li>
-      <li><strong>Our origin is one process.</strong> No clustering or CDN; it serves a LAN, which is what it was built for.</li>
+      <li><strong>One machine, loopback.</strong> Client, server and origin share a host, so absolute times are optimistic for a real Wi-Fi network, which adds delay and jitter to every system. WebRTC's jitter buffer in particular would grow.</li>
+      <li><strong>No loss on the benchmarked systems.</strong> See §6: loss was only applied to raw UDP.</li>
+      <li><strong>WebRTC's startup is pessimistic.</strong> The shared encoder can't send a keyframe on request, as a dedicated WebRTC sender would.</li>
+      <li><strong>LANFLIX-LL is a benchmark configuration.</strong> The server, store and player handle 200&nbsp;ms chunks, but the app's upload path still produces 2&nbsp;s chunks.</li>
+      <li><strong>Not tested:</strong> LL-DASH (chunked CMAF), and WebRTC with a player tuned for minimum jitter buffer.</li>
+      <li><strong>Synthetic source.</strong> A test pattern, 720p30, one bitrate. No system used adaptive bitrate.</li>
     </ul>
   </section>
 
   <section class="col">
     <h2><span class="num">10</span>Reproducing</h2>
-    <p>With Redis, Kafka and the server running (see the project README):</p>
-<pre>go build -o bench/bin/source.exe ./bench/source
-go build -o bench/bin/load.exe  ./bench/load
-go build -o bench/bin/udp.exe   ./bench/udp
-bench/bin/source.exe -duration 5400 &amp;          # one encoder → all three systems
+    <p>With Redis, Kafka and the LANFLIX server running (see the project README):</p>
+<pre>go run ./bench/source &amp;                        # one encoder → all eight configurations (:8095)
 node bench/run.js --trials 10 --sample 15 --seeks 4
-bench/bin/load.exe -pid &lt;server pid&gt; -n 1,10,25,50,100,200
-bench/bin/udp.exe
-python bench/analyze.py                        # → bench/results/summary.json</pre>
+curl -s "localhost:8095/requests?since=0" &gt; bench/results/requests.json
+go run ./bench/load -pid &lt;server pid&gt; -n 1,10,25,50,100,200
+go run ./bench/udp
+python bench/analyze.py                        # → bench/results/summary.json
+python bench/report/build.py                   # → this report</pre>
   </section>
 </div>
 
@@ -250,13 +272,21 @@ const DATA = /*__DATA__*/null;
 
 /* ---------- data access & formatting ---------- */
 const C = Object.fromEntries(DATA.configs.map((c) => [c.key, c]));
-const ORDER = ['ours', 'hls', 'hls-tuned', 'dash', 'dash-tuned'];
-const COLOR = { ours: 'var(--s1)', hls: 'var(--s2)', 'hls-tuned': 'var(--s3)', dash: 'var(--s4)', 'dash-tuned': 'var(--s5)', udp: 'var(--s7)', before: 'var(--s2)', after: 'var(--s1)' };
-const SHORT = { ours: 'Ours', hls: 'HLS', 'hls-tuned': 'HLS tuned', dash: 'DASH', 'dash-tuned': 'DASH tuned' };
+const ORDER = ['ours', 'ours-ll', 'hls', 'hls-tuned', 'll-hls', 'dash', 'dash-tuned', 'webrtc'];
+// Color = protocol family (validated slots 1-3 + violet); each variant is
+// named on its own row, and dashed wherever lines overlap.
+const COLOR = { ours: 'var(--s1)', 'ours-ll': 'var(--s1)', hls: 'var(--s2)', 'hls-tuned': 'var(--s2)', 'll-hls': 'var(--s2)',
+  dash: 'var(--s3)', 'dash-tuned': 'var(--s3)', webrtc: 'var(--s7)', udp: 'var(--ink-2)', before: 'var(--s2)', after: 'var(--s1)' };
+const SHORT = { ours: 'LANFLIX', 'ours-ll': 'LANFLIX-LL', hls: 'HLS', 'hls-tuned': 'HLS tuned', 'll-hls': 'LL-HLS',
+  dash: 'DASH', 'dash-tuned': 'DASH tuned', webrtc: 'WebRTC' };
+const OURS = new Set(['ours', 'ours-ll']);
+const DASHED = new Set(['hls-tuned', 'll-hls', 'dash-tuned']);
+const labClass = (k) => (OURS.has(k) || k === 'after' ? 'lab-strong' : 'lab');
 const med = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const fmt = {
   ms: (v) => v >= 1000 ? (v / 1000).toFixed(2) + ' s' : Math.round(v) + ' ms',
   s: (v) => (v / 1000).toFixed(1) + ' s',
+  s2: (v) => v < 1000 ? (v / 1000).toFixed(2) + ' s' : (v / 1000).toFixed(1) + ' s',
   int: (v) => Math.round(v).toLocaleString('en-US'),
   pct: (v) => (v < 10 ? v.toFixed(1) : Math.round(v)) + '%',
   mbps: (v) => Math.round(v) + ' Mb/s',
@@ -271,12 +301,11 @@ const derived = {
   'load.delivered': loadTotals.d, 'load.expected': loadTotals.e, 'load.mismatches': loadTotals.m,
   'udp.secs': 60,
   'meta.trials': DATA.meta.trials,
-  'meta.encoder_startup_ms': DATA.meta.encoder_startup_ms,
 };
 function resolve(path) {
   if (path in derived) return derived[path];
   const [key, ...rest] = path.split('.');
-  let v = C[key];
+  let v = key === 'meta' ? DATA.meta : C[key];
   for (const r of rest) v = v == null ? v : v[r];
   return v;
 }
@@ -320,7 +349,8 @@ function svgPoint(svg, evt) {
   return { x: (evt.clientX - r.left) * vb.width / r.width, y: (evt.clientY - r.top) * vb.height / r.height, px: evt.clientX - r.left, py: evt.clientY - r.top };
 }
 function legendHTML(items, kind = 'line') {
-  return '<div class="legend">' + items.map(([k, label]) => `<span><i class="${kind === 'dot' ? 'dot' : ''}" style="background:${COLOR[k]}"></i>${label}</span>`).join('') + '</div>';
+  const sw = (k) => DASHED.has(k) && kind !== 'dot' ? `background:repeating-linear-gradient(90deg,${COLOR[k]} 0 5px,transparent 5px 8px)` : `background:${COLOR[k]}`;
+  return '<div class="legend">' + items.map(([k, label]) => `<span><i class="${kind === 'dot' ? 'dot' : ''}" style="${sw(k)}"></i>${label}</span>`).join('') + '</div>';
 }
 function tableHTML(head, rows) {
   return `<details class="data"><summary>Show data</summary><div class="tw"><table><thead><tr>${head.map((h, i) => `<th class="${i ? 'n' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${
@@ -328,17 +358,17 @@ function tableHTML(head, rows) {
 }
 
 /* ---------- strip plot: one row per config ---------- */
-function strip(id, field, { unit = fmt.ms, log = false } = {}) {
+function strip(id, field, { unit = fmt.ms, log = false, logTicks = [1, 10, 100, 1000, 10000] } = {}) {
   const fig = document.getElementById(id);
   const rows = ORDER.filter((k) => C[k] && C[k][field] && C[k][field].length).map((k) => ({ k, vals: C[k][field] }));
   const all = rows.flatMap((r) => r.vals);
   const W = 880, rowH = 38, L = 118, R = 70, T = 8, H = T + rows.length * rowH + 30;
   let lo = 0, hi = Math.max(...all) * 1.05;
   const tf = log ? (v) => Math.log10(Math.max(v, 1)) : (v) => v;
-  if (log) { lo = 0; hi = Math.log10(Math.max(...all) * 1.3); }
+  if (log) { lo = Math.log10(Math.min(...all) * 0.7); hi = Math.log10(Math.max(...all) * 1.3); }
   const x = (v) => L + (tf(v) - lo) / (hi - lo) * (W - L - R);
   const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
-  const ticks = log ? [1, 10, 100, 1000, 10000].filter((t) => Math.log10(t) <= hi) : niceTicks(0, hi, 6);
+  const ticks = log ? logTicks.filter((t) => Math.log10(t) >= lo && Math.log10(t) <= hi) : niceTicks(0, hi, 6);
   ticks.forEach((t) => {
     el('line', { x1: x(t), x2: x(t), y1: T, y2: H - 26, class: 'grid' }, svg);
     el('text', { x: x(t), y: H - 10, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = unit(t);
@@ -346,7 +376,7 @@ function strip(id, field, { unit = fmt.ms, log = false } = {}) {
   const tip = tipFor(fig);
   rows.forEach((r, i) => {
     const cy = T + i * rowH + rowH / 2;
-    el('text', { x: L - 12, y: cy + 4, 'text-anchor': 'end', class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = SHORT[r.k];
+    el('text', { x: L - 12, y: cy + 4, 'text-anchor': 'end', class: labClass(r.k) }, svg).textContent = SHORT[r.k];
     el('line', { x1: L, x2: W - R, y1: cy, y2: cy, class: 'base', 'stroke-opacity': .5 }, svg);
     r.vals.forEach((v, j) => {
       const jit = ((j * 7919) % 13 - 6) * 1.3;
@@ -357,7 +387,7 @@ function strip(id, field, { unit = fmt.ms, log = false } = {}) {
     });
     const m = med(r.vals);
     el('line', { x1: x(m), x2: x(m), y1: cy - 13, y2: cy + 13, stroke: 'var(--ink)', 'stroke-width': 2, 'stroke-linecap': 'round' }, svg);
-    el('text', { x: W - R + 10, y: cy + 4, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = unit(m);
+    el('text', { x: W - R + 10, y: cy + 4, class: labClass(r.k) }, svg).textContent = unit(m);
   });
   el('text', { x: W - R + 10, y: T - 0 + 0, class: 'ax' }, svg);
   fig.appendChild(svg);
@@ -367,9 +397,9 @@ function strip(id, field, { unit = fmt.ms, log = false } = {}) {
 }
 
 /* ---------- CDF (log x) ---------- */
-function cdf(id) {
+function cdf(id, keys) {
   const fig = document.getElementById(id);
-  const series = ORDER.filter((k) => C[k] && C[k].delivery_ms.length).map((k) => ({ k, s: [...C[k].delivery_ms].map((v) => Math.max(v, 1)).sort((a, b) => a - b) }));
+  const series = keys.filter((k) => C[k] && C[k].delivery_ms.length).map((k) => ({ k, s: [...C[k].delivery_ms].map((v) => Math.max(v, 1)).sort((a, b) => a - b) }));
   fig.insertAdjacentHTML('afterbegin', legendHTML(series.map((r) => [r.k, SHORT[r.k]])));
   const W = 880, H = 330, L = 52, R = 150, T = 12, B = 40;
   const maxV = Math.max(...series.flatMap((r) => r.s));
@@ -386,13 +416,13 @@ function cdf(id) {
     el('text', { x: x(t), y: H - B + 18, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = fmt.ms(t);
   });
   el('line', { x1: L, x2: W - R, y1: y(0), y2: y(0), class: 'base' }, svg);
-  el('text', { x: (L + W - R) / 2, y: H - 4, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = 'delay from segment available → viewer has it (log scale)';
+  el('text', { x: (L + W - R) / 2, y: H - 4, 'text-anchor': 'middle', class: 'ax' }, svg).textContent = 'delay from unit available → viewer has it (log scale)';
   series.forEach((r) => {
     let d = `M${x(r.s[0])},${y(0)}`;
     r.s.forEach((v, i) => { d += ` L${x(v)},${y(i / r.s.length)} L${x(v)},${y((i + 1) / r.s.length)}`; });
-    el('path', { d, fill: 'none', stroke: COLOR[r.k], 'stroke-width': r.k === 'ours' ? 2.5 : 2, 'stroke-linejoin': 'round' }, svg);
+    el('path', { d, fill: 'none', stroke: COLOR[r.k], 'stroke-width': OURS.has(r.k) ? 2.5 : 2, 'stroke-linejoin': 'round', 'stroke-dasharray': DASHED.has(r.k) ? '6 4' : 'none' }, svg);
     const m = med(r.s);
-    el('text', { x: W - R + 8, y: 0, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg);
+    el('text', { x: W - R + 8, y: 0, class: labClass(r.k) }, svg);
     r.medianX = x(m);
   });
   // Median markers on the curves; labels stacked in the right gutter,
@@ -402,7 +432,7 @@ function cdf(id) {
     el('circle', { cx: r.medianX, cy: y(.5), r: 4, fill: COLOR[r.k], stroke: 'var(--surface)', 'stroke-width': 2 }, svg);
     const ly = y(.5) - 26 + i * 17;
     el('circle', { cx: W - R + 14, cy: ly - 4, r: 4, fill: COLOR[r.k] }, svg);
-    el('text', { x: W - R + 23, y: ly, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = `${SHORT[r.k]} ${fmt.ms(med(r.s))}`;
+    el('text', { x: W - R + 23, y: ly, class: labClass(r.k) }, svg).textContent = `${SHORT[r.k]} ${fmt.ms(med(r.s))}`;
   });
   const tip = tipFor(fig);
   const guide = el('line', { y1: T, y2: H - B, stroke: 'var(--ink-3)', 'stroke-width': 1, opacity: 0 }, svg);
@@ -417,7 +447,7 @@ function cdf(id) {
   });
   hit.addEventListener('pointerleave', () => { tip.hide(); guide.setAttribute('opacity', 0); });
   fig.appendChild(svg);
-  fig.insertAdjacentHTML('beforeend', tableHTML(['Configuration', 'Segments', 'Median', 'p90', 'p95', 'Max'],
+  fig.insertAdjacentHTML('beforeend', tableHTML(['Configuration', 'Units timed', 'Median', 'p90', 'p95', 'Max'],
     series.map((r) => { const q = (p) => r.s[Math.round((r.s.length - 1) * p)]; return [SHORT[r.k], r.s.length, fmt.ms(med(r.s)), fmt.ms(q(.9)), fmt.ms(q(.95)), fmt.ms(r.s[r.s.length - 1])]; })));
 }
 
@@ -431,10 +461,10 @@ function bars(id, rows, unit) {
   const tip = tipFor(fig);
   rows.forEach((r, i) => {
     const y0 = T + i * rowH + 7, bh = rowH - 14;
-    el('text', { x: L - 12, y: y0 + bh / 2 + 4, 'text-anchor': 'end', class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = SHORT[r.k] || r.label;
+    el('text', { x: L - 12, y: y0 + bh / 2 + 4, 'text-anchor': 'end', class: labClass(r.k) }, svg).textContent = SHORT[r.k] || r.label;
     const w = Math.max(x(r.v) - L, 2);
     el('path', { d: `M${L},${y0} h${Math.max(w - 4, 0)} a4,4 0 0 1 4,4 v${bh - 8} a4,4 0 0 1 -4,4 h${-Math.max(w - 4, 0)} z`, fill: COLOR[r.k] }, svg);
-    el('text', { x: L + w + 8, y: y0 + bh / 2 + 4, class: r.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = unit(r.v);
+    el('text', { x: L + w + 8, y: y0 + bh / 2 + 4, class: labClass(r.k) }, svg).textContent = unit(r.v);
     const hit = el('rect', { x: L, y: y0 - 4, width: W - L - R, height: bh + 8, fill: 'transparent' }, svg);
     hit.addEventListener('pointermove', (e) => { const p = svgPoint(svg, e); tip.show(`<b>${SHORT[r.k]}</b><br>${unit(r.v)}${r.note ? '<br>' + r.note : ''}`, p.px, p.py); });
     hit.addEventListener('pointerleave', () => tip.hide());
@@ -473,39 +503,42 @@ function lines(id, series, { xLabel, yUnit, xTicks, yMax }) {
       hit.addEventListener('pointerleave', () => tip.hide());
     });
     const last = s.pts[s.pts.length - 1];
-    el('text', { x: x(last[0]) + 10, y: y(last[1]) + 4, class: s.k === 'after' || s.k === 'ours' ? 'lab-strong' : 'lab' }, svg).textContent = `${s.short || s.label} ${yUnit(last[1])}`;
+    el('text', { x: x(last[0]) + 10, y: y(last[1]) + 4, class: labClass(s.k) }, svg).textContent = `${s.short || s.label} ${yUnit(last[1])}`;
   });
   fig.appendChild(svg);
 }
 
 /* ---------- render ---------- */
 if (DATA.seek_by_position) document.getElementById('seekByPos').textContent = DATA.seek_by_position.ours.map((v) => Math.round(v) + ' ms').join(' → ');
+const dot = (k) => `<span class="mk" style="color:${COLOR[k]}">●</span>`;
 document.getElementById('configTable').innerHTML = `<thead><tr><th>Configuration</th><th>Player</th><th>Live-edge policy</th></tr></thead><tbody>
-  <tr><td><span class="mk" style="color:var(--s1)">●</span> <strong>Ours</strong></td><td>Production player (MSE)</td><td>Join newest segment; server pushes each new one</td></tr>
-  <tr><td><span class="mk" style="color:var(--s2)">●</span> HLS</td><td>hls.js 1.7.3, defaults</td><td>3 segments behind live; polls playlist</td></tr>
-  <tr><td><span class="mk" style="color:var(--s3)">●</span> HLS tuned</td><td>hls.js, <code>liveSyncDurationCount: 1</code></td><td>1 segment behind live; polls playlist</td></tr>
-  <tr><td><span class="mk" style="color:var(--s4)">●</span> DASH</td><td>dash.js 5.2.1, defaults</td><td>Delay from manifest; requests by template</td></tr>
-  <tr><td><span class="mk" style="color:var(--s5)">●</span> DASH tuned</td><td>dash.js, <code>liveDelay: 2.5 s</code>, catch-up on</td><td>~1 segment behind live</td></tr></tbody>`;
+  <tr><td>${dot('ours')} <strong>LANFLIX</strong></td><td>Production player (MSE)</td><td>2&nbsp;s chunks; joins the newest; server pushes each new one</td></tr>
+  <tr><td>${dot('ours-ll')} <strong>LANFLIX-LL</strong></td><td>Production player (MSE)</td><td>200&nbsp;ms chunks; joins 0.6&nbsp;s behind the newest</td></tr>
+  <tr><td>${dot('hls')} HLS</td><td>hls.js 1.7.3, defaults</td><td>3 segments behind live; polls playlist</td></tr>
+  <tr><td>${dot('hls-tuned')} HLS tuned</td><td>hls.js, <code>liveSyncDurationCount: 1</code></td><td>1 segment behind live; polls playlist</td></tr>
+  <tr><td>${dot('ll-hls')} LL-HLS</td><td>hls.js, <code>lowLatencyMode</code></td><td>200&nbsp;ms parts, 0.6&nbsp;s hold-back; blocking reload, preload hints, delta updates</td></tr>
+  <tr><td>${dot('dash')} DASH</td><td>dash.js 5.2.1, defaults</td><td>Delay from manifest; requests by template</td></tr>
+  <tr><td>${dot('dash-tuned')} DASH tuned</td><td>dash.js, <code>liveDelay: 2.5 s</code>, catch-up on</td><td>~1 segment behind live</td></tr>
+  <tr><td>${dot('webrtc')} WebRTC</td><td>Chrome, defaults</td><td>RTP relayed by pion; jitter buffer only</td></tr></tbody>`;
 
-const ttffMed = C.ours.ttff.median, bestOtherTtff = Math.min(...ORDER.slice(1).filter((k) => C[k]).map((k) => C[k].ttff.median));
-const delivMed = C.ours.delivery.median, bestOtherDeliv = Math.min(...ORDER.slice(1).filter((k) => C[k]).map((k) => C[k].delivery.median));
-const hlsReq = C.hls.requests_per_min.median;
 const udp1 = (DATA.udp || []).find((u) => u.loss_pct === 1);
 document.getElementById('keys').innerHTML = [
-  [fmt.ms(delivMed), `to deliver a new segment, vs ${fmt.ms(bestOtherDeliv)} for the best HLS/DASH setup (median)`],
-  [fmt.ms(ttffMed), `to first frame at the live edge, vs ${fmt.ms(bestOtherTtff)} for the fastest alternative`],
-  [loadTotals.m === 0 ? '0' : fmt.int(loadTotals.m), `corrupted bytes across ${fmt.int(loadTotals.d)} verified segment deliveries, up to 200 viewers`],
-  udp1 ? [fmt.int(udp1.decode_errors), `decoder errors in one minute of raw UDP video at just 1% packet loss`] : null,
-].filter(Boolean).map(([v, l]) => `<div class="key"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  [fmt.ms(C.webrtc.latency.median), `glass-to-glass for WebRTC: the latency winner, ~${Math.round(C['ll-hls'].latency.median / C.webrtc.latency.median)}× below any segment-based system`],
+  [`${fmt.ms(C['ours-ll'].latency.median)} <small>vs</small> ${fmt.ms(C['ll-hls'].latency.median)}`, `LANFLIX vs LL-HLS at equal 200&nbsp;ms chunks: near parity, LL-HLS slightly ahead`],
+  [fmt.ms(C.ours.ttff.median), `to first frame for LANFLIX, vs ${fmt.ms(Math.min(C.hls.ttff.median, C['ll-hls'].ttff.median, C.dash.ttff.median))} for the fastest HLS/DASH setup`],
+  [fmt.int(C['ll-hls'].requests_per_min.median), `HTTP requests per viewer per minute for LL-HLS; LANFLIX uses one socket per session`],
+].map(([v, l]) => `<div class="key"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
 document.getElementById('byline').textContent =
-  `${DATA.meta.trials} trials × ${DATA.configs.length} configurations · ${DATA.configs.reduce((n, c) => n + c.delivery_ms.length, 0).toLocaleString()} segment deliveries timed · single 8-core Windows host, headless Chromium`;
+  `${DATA.meta.trials} trials × ${DATA.configs.length} configurations · ${DATA.configs.reduce((n, c) => n + c.delivery_ms.length, 0).toLocaleString()} chunk deliveries timed · ${DATA.meta.encoder_clock.frames.toLocaleString()} frames clocked · single 8-core Windows host, headless Chromium`;
 
 strip('fTtff', 'ttff_ms');
-strip('fLatency', 'latency_run_medians_ms', { unit: fmt.s });
-cdf('fCdf');
+strip('fLatency', 'latency_run_medians_ms', { unit: fmt.s2, log: true, logTicks: [30, 100, 300, 1000, 3000, 10000] });
+cdf('fCdf', ['ours', 'hls', 'hls-tuned', 'dash', 'dash-tuned']);
+cdf('fCdfLL', ['ours-ll', 'll-hls']);
 strip('fSeek', 'seek_ms');
+bars('fFreeze', ORDER.filter((k) => C[k]).map((k) => ({ k, v: C[k].freezes_per_run.mean, note: `${fmt.int(C[k].freeze_ms_per_run.mean)} ms frozen per 15 s on average` })), (v) => v.toFixed(1));
 bars('fReq', ORDER.filter((k) => C[k]).map((k) => ({ k, v: C[k].requests_per_min.median })), (v) => v.toFixed(v < 10 ? 1 : 0) + ' /min');
-bars('fSegs', ORDER.filter((k) => C[k]).map((k) => ({ k, v: C[k].segments_fetched_per_session.median })), (v) => Math.round(v) + ' segs');
+bars('fSegs', ORDER.filter((k) => C[k] && C[k].media_s_per_session).map((k) => ({ k, v: C[k].media_s_per_session.median })), (v) => Math.round(v) + ' s');
 
 if (LOAD.length) {
   const before = (DATA.load_before_hub || {}).steps || [];
@@ -538,30 +571,28 @@ const ICON = {
   p: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zm0 1.5v9a4.5 4.5 0 0 1 0-9z"/></svg>',
 };
 const mk = (v, text) => `<span class="mk ${v}">${ICON[v]}${text || { y: 'Yes', n: 'No', p: 'Partial' }[v]}</span>`;
-const measured = (k) => ({ d: fmt.ms(C[k].delivery.median), t: fmt.ms(C[k].ttff.median) });
 const M = [
   ['Measured in this study', null],
-  ['New-segment delivery (median)', ['y', measured('ours').d], ['n', measured('hls-tuned').d], ['n', measured('dash-tuned').d], ['y', 'Immediate (not timed)']],
-  ['Time to first frame (median)', ['y', measured('ours').t], ['p', measured('hls').t], ['p', measured('dash').t], ['p', 'Next keyframe (not timed)']],
-  ['Seek into stream history (median)', ['p', fmt.ms(C.ours.seek.median) + ' (slowest)'], ['y', fmt.ms(C.hls.seek.median)], ['y', fmt.ms(C.dash.seek.median)], ['n', 'Impossible']],
-  ['Stalls during steady playback', ['y', 'None'], ['p', `None by default; tuned ${C['hls-tuned'].stalls_per_run.mean.toFixed(1)} per 15 s`],['n', `${Math.round(C.dash.stalls_per_run.mean)} per 15 s`], ['p', 'Corruption instead']],
-  ['Intact delivery under packet loss', ['y', 'TCP'], ['y', 'TCP'], ['y', 'TCP'], ['n', udp1 ? fmt.int(udp1.decode_errors) + ' decode errors/min at 1%' : 'No']],
-  ['Origin requests per viewer', ['y', '1 socket / session'], ['n', `${Math.round(C.hls.requests_per_min.median)} / min`], ['n', `${Math.round(C.dash.requests_per_min.median)} / min`], ['y', 'None']],
-  ['Bandwidth after a seek', ['n', 'Pushes to live edge'], ['y', '30 s buffer'], ['y', 'Bounded buffer'], ['p', 'n/a']],
+  ['Live latency (median)', ['p', `${fmt.ms(C['ours-ll'].latency.median)} (200 ms) · ${fmt.s(C.ours.latency.median)} (2 s)`], ['p', `${fmt.ms(C['ll-hls'].latency.median)} (LL) · ${fmt.s(C['hls-tuned'].latency.median)} (tuned)`], ['n', `${fmt.s(C['dash-tuned'].latency.median)} (tuned)`], ['y', fmt.ms(C.webrtc.latency.median)], ['y', 'Immediate (not timed)']],
+  ['Time to first frame (median)', ['y', `${fmt.ms(C.ours.ttff.median)}–${fmt.ms(C['ours-ll'].ttff.median)}`], ['p', fmt.ms(C['ll-hls'].ttff.median)], ['p', fmt.ms(C.dash.ttff.median)], ['n', `${fmt.ms(C.webrtc.ttff.median)} (keyframe wait)`], ['p', 'Next keyframe']],
+  ['New media reaches viewer', ['y', `${fmt.ms(C['ours-ll'].delivery.median)}–${fmt.ms(C.ours.delivery.median)} push`], ['p', `${fmt.ms(C['ll-hls'].delivery.median)} (LL) · ${fmt.ms(C['hls-tuned'].delivery.median)} (poll)`], ['n', fmt.ms(C.dash.delivery.median)], ['y', 'Per packet'], ['y', 'Immediate']],
+  ['Seek into stream history', ['p', fmt.ms(C.ours.seek.median)], ['y', fmt.ms(C.hls.seek.median)], ['y', fmt.ms(C.dash.seek.median)], ['n', 'Impossible'], ['n', 'Impossible']],
+  ['Freezes in steady playback', ['y', 'None'], ['y', `~None (tuned ${C['hls-tuned'].freezes_per_run.mean.toFixed(1)} per 15 s)`], ['n', `${C.dash.freezes_per_run.mean.toFixed(1)}–${C['dash-tuned'].freezes_per_run.mean.toFixed(1)} per 15 s`], ['y', 'None (no loss)'], ['p', 'Corruption instead']],
+  ['Origin load per viewer', ['y', '1 socket / session'], ['n', `${Math.round(C.hls.requests_per_min.median)}–${Math.round(C['ll-hls'].requests_per_min.median)} req / min`], ['n', `${Math.round(C['dash-tuned'].requests_per_min.median)}–${Math.round(C.dash.requests_per_min.median)} req / min`], ['y', '1 connection'], ['y', 'None']],
+  ['Bandwidth after a seek', ['n', 'Pushes to live edge'], ['y', 'Bounded buffer'], ['y', 'Bounded buffer'], ['p', 'n/a'], ['p', 'n/a']],
+  ['Intact delivery under packet loss', ['y', 'TCP'], ['y', 'TCP'], ['y', 'TCP'], ['p', 'NACK + jitter buffer (not tested)'], ['n', udp1 ? fmt.int(udp1.decode_errors) + ' decode errors/min at 1%' : 'No']],
   ['Built into the design', null],
-  ['Join late, watch from the start', ['y'], ['y', 'EVENT playlist'], ['y', 'Time-shift window'], ['n']],
-  ['Resume across sessions (server-side)', ['y'], ['n', 'App must build it'], ['n', 'App must build it'], ['n']],
-  ['Per-viewer analytics pipeline', ['y', 'Kafka'], ['n', 'Beacons needed'], ['n', 'Beacons needed'], ['n']],
-  ['Live viewer count per stream', ['y'], ['p', 'Estimate from logs'], ['p', 'Estimate from logs'], ['n']],
-  ['Adaptive bitrate', ['n'], ['y'], ['y'], ['n']],
-  ['CDN / HTTP-cache friendly', ['n'], ['y'], ['y'], ['n']],
-  ['Plays on iPhone', ['n', 'Needs MSE'], ['y', 'Native'], ['n', 'Needs MSE'], ['n']],
-  ['Network egress with N viewers', ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['y', '1 × (multicast)']],
-  ['Internet scale', ['n', 'Single origin'], ['y'], ['y'], ['n']],
+  ['Join late, watch from the start', ['y'], ['y', 'EVENT playlist'], ['y', 'Time-shift window'], ['n'], ['n']],
+  ['Resume across sessions (server-side)', ['y'], ['n', 'App must build it'], ['n', 'App must build it'], ['n'], ['n']],
+  ['Per-viewer analytics pipeline', ['y', 'Kafka'], ['n', 'Beacons needed'], ['n', 'Beacons needed'], ['p', 'Stats API'], ['n']],
+  ['Adaptive bitrate', ['n'], ['y'], ['y'], ['y', 'Encoder adapts'], ['n']],
+  ['CDN / HTTP-cache friendly', ['n'], ['y'], ['y'], ['n'], ['n']],
+  ['Plays on iPhone', ['n', 'Needs MSE'], ['y', 'Native'], ['n', 'Needs MSE'], ['y'], ['n']],
+  ['Network egress with N viewers', ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['n', 'N × bitrate'], ['y', '1 × (multicast)']],
 ];
 document.getElementById('matrix').innerHTML =
-  `<colgroup><col><col class="ours"><col><col><col></colgroup><thead><tr><th></th><th>Ours</th><th>HLS</th><th>DASH</th><th>UDP multicast</th></tr></thead><tbody>` +
+  `<colgroup><col><col class="ours"><col><col><col><col></colgroup><thead><tr><th></th><th>LANFLIX</th><th>HLS / LL-HLS</th><th>DASH</th><th>WebRTC</th><th>UDP multicast</th></tr></thead><tbody>` +
   M.map((r) => r[1] === null
-    ? `<tr><th colspan="5" style="padding-top:18px;color:var(--ink);font-family:var(--cond);font-size:14px">${r[0]}</th></tr>`
+    ? `<tr><th colspan="6" style="padding-top:18px;color:var(--ink);font-family:var(--cond);font-size:14px">${r[0]}</th></tr>`
     : `<tr><td>${r[0]}</td>${r.slice(1).map(([v, t]) => `<td>${mk(v, t)}</td>`).join('')}</tr>`).join('') + '</tbody>';
 </script>

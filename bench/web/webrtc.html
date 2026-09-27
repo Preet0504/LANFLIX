@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>bench: webrtc</title></head>
+<body style="margin:0;background:#000">
+<video id="v" muted playsinline autoplay style="width:640px"></video>
+<script type="module">
+// WebRTC viewer: WHEP-style signaling to the origin's pion relay, browser
+// defaults otherwise (Chrome's adaptive jitter buffer). Live only: WebRTC
+// has no history to seek into, so this page runs no seeks.
+import { B, q, wall, timeline, instrument, protocol } from './common.js';
+
+const video = document.getElementById('v');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Frames carry their RTP timestamp; the origin publishes which RTP
+// timestamp corresponds to which point on the shared media timeline
+// (same keyframe on both sides), so latency is computed exactly as for
+// every other system.
+let tl = await timeline();
+while (!tl.webrtc) { await sleep(200); tl = await timeline(); }
+const { rtp_ts: anchorTs, media_ms: anchorMs } = tl.webrtc;
+instrument(video, {
+  mediaTimeOf: (meta) => (meta.rtpTimestamp == null ? null
+    : anchorMs / 1000 + ((meta.rtpTimestamp - anchorTs) | 0) / 90000), // |0: signed 32-bit, survives wraparound
+});
+B.config = 'pion relay, Chrome defaults';
+
+B.tStart = wall();
+const pc = new RTCPeerConnection();
+pc.addTransceiver('video', { direction: 'recvonly' });
+pc.addTransceiver('audio', { direction: 'recvonly' });
+const stream = new MediaStream();
+pc.ontrack = (e) => {
+  stream.addTrack(e.track);
+  if (video.srcObject !== stream) video.srcObject = stream;
+};
+pc.onconnectionstatechange = () => {
+  if (pc.connectionState === 'connected' && B.connectedMs == null) B.connectedMs = wall() - B.tStart;
+  if (pc.connectionState === 'failed') B.errors.push('peer connection failed');
+};
+
+await pc.setLocalDescription(await pc.createOffer());
+// Non-trickle: send the offer once every local candidate is in it.
+await new Promise((resolve) => {
+  if (pc.iceGatheringState === 'complete') return resolve();
+  pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+  setTimeout(resolve, 2000);
+});
+const res = await fetch('/webrtc/whep', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+if (!res.ok) B.errors.push('whep: ' + res.status + ' ' + (await res.text()));
+else await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+video.play().catch((e) => B.errors.push('play: ' + e.message));
+
+protocol({
+  seek: null,
+  sampleS: Number(q.get('sample') || 15),
+  beforeDone: async () => {
+    for (const s of (await pc.getStats()).values()) {
+      if (s.type === 'inbound-rtp' && s.kind === 'video') {
+        B.rtc = {
+          freezeCount: s.freezeCount, totalFreezesDuration: s.totalFreezesDuration,
+          framesDecoded: s.framesDecoded, framesDropped: s.framesDropped, packetsLost: s.packetsLost,
+          nackCount: s.nackCount, pliCount: s.pliCount,
+          jitterBufferDelayMs: s.jitterBufferEmittedCount ? (1000 * s.jitterBufferDelay) / s.jitterBufferEmittedCount : null,
+          codec: s.codecId,
+        };
+      }
+    }
+    pc.close();
+  },
+});
+</script>
+</body>
+</html>

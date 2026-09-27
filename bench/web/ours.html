@@ -5,18 +5,25 @@
 <video id="v" muted playsinline style="width:640px"></video>
 <script type="module">
 // Runs the production player (web/assets/player.js) unmodified.
+//
+// ll=1: the same server and player on the 200ms-fragment stream. It joins
+// 0.6s before the end of the newest fragment — LL-HLS's PART-HOLD-BACK in
+// this run — so both low-latency systems start with the same margin.
 import { B, q, wall, timeline, instrument, markReceipt, protocol } from './common.js';
 import { StreamPlayer } from '/assets/player.js';
 
 const video = document.getElementById('v');
 instrument(video);
+const ll = q.get('ll') === '1';
+const HOLD_BACK_MS = 600;
 const tl = await timeline();
-const edge = Math.max(...Object.keys(tl.ours).map(Number));
+const edgeMs = (t) => (ll ? t.ll_edge_ms : t.ours_edge * t.gop_ms);
 
 const player = new StreamPlayer(video, {
   host: q.get('host') || 'localhost:8090',
   // Each media chunk starts with moof → mfhd; its sequence_number (offset
-  // 20, 1-based) identifies the segment. Chunk 0 on a socket is the init.
+  // 20, 1-based) identifies the segment (or, with ll=1, the fragment).
+  // Chunk 0 on a socket is the init.
   onChunk: (buf) => {
     if (buf.byteLength < 24) return;
     const dv = new DataView(buf);
@@ -24,18 +31,16 @@ const player = new StreamPlayer(video, {
     markReceipt(dv.getUint32(20) - 1);
   },
 });
-player.movieId = tl.movie_id;
-player.liveEdgeMs = edge * tl.gop_ms;
-B.joinSegment = edge;
+player.movieId = ll ? tl.ll_movie_id : tl.movie_id;
+window.__player = player; // for driving seeks by hand when debugging
+player.liveEdgeMs = edgeMs(tl);
+B.config = ll ? '200ms chunks, joins 0.6s behind the end of the newest' : '2s chunks, joins at newest';
 
 // Keep the clamp for seeks current as the live edge advances.
-setInterval(async () => {
-  const t = await timeline();
-  player.liveEdgeMs = Math.max(...Object.keys(t.ours).map(Number)) * t.gop_ms;
-}, 1000);
+setInterval(async () => { player.liveEdgeMs = edgeMs(await timeline()); }, 1000);
 
 B.tStart = wall();
-player.connect(edge * tl.gop_ms); // join at the live edge
+player.connect(ll ? Math.max(0, Math.floor(edgeMs(tl) - HOLD_BACK_MS)) : edgeMs(tl));
 video.play().catch((e) => B.errors.push('play: ' + e.message));
 
 protocol({ seek: (s) => player.seekTo(s * 1000), sampleS: Number(q.get('sample') || 15), seeks: Number(q.get('seeks') || 4) });

@@ -28,15 +28,15 @@ import (
 )
 
 type result struct {
-	LossPct         float64 `json:"loss_pct"`
-	Datagrams       int     `json:"datagrams"`
-	Dropped         int     `json:"dropped"`
-	TSPackets       int     `json:"ts_packets_received"`
-	CCErrors        int     `json:"continuity_errors"`
-	DecodeErrors    int     `json:"decode_errors"`
-	FramesDecoded   int     `json:"frames_decoded"`
-	FramesExpected  int     `json:"frames_expected"`
-	FrameLossPct    float64 `json:"frame_loss_pct"`
+	LossPct        float64 `json:"loss_pct"`
+	Datagrams      int     `json:"datagrams"`
+	Dropped        int     `json:"dropped"`
+	TSPackets      int     `json:"ts_packets_received"`
+	CCErrors       int     `json:"continuity_errors"`
+	DecodeErrors   int     `json:"decode_errors"`
+	FramesDecoded  int     `json:"frames_decoded"`
+	FramesExpected int     `json:"frames_expected"`
+	FrameLossPct   float64 `json:"frame_loss_pct"`
 }
 
 func main() {

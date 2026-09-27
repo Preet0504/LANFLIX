@@ -23,11 +23,17 @@ const EDGE = process.env.BROWSER_PATH || 'C:\\Program Files (x86)\\Microsoft\\Ed
 
 const SYSTEMS = [
   { id: 'ours', page: 'ours.html', label: 'Ours (Redis Streams + WS push)' },
+  { id: 'ours-ll', page: 'ours.html?ll=1', label: 'Ours, 200ms chunks' },
   { id: 'hls', page: 'hls.html', label: 'HLS (hls.js defaults)' },
   { id: 'hls-tuned', page: 'hls.html?tuned=1', label: 'HLS (tuned: 1-segment sync)' },
+  { id: 'll-hls', page: 'hls.html?ll=1', label: 'LL-HLS (200ms parts, hls.js)' },
   { id: 'dash', page: 'dash.html', label: 'DASH (dash.js defaults)' },
   { id: 'dash-tuned', page: 'dash.html?tuned=1', label: 'DASH (tuned: 2.5s delay)' },
+  { id: 'webrtc', page: 'webrtc.html', label: 'WebRTC (pion relay)' },
 ].filter((s) => !args.only || args.only.split(',').includes(s.id));
+
+// Which origin request log each system's traffic is filed under.
+const ORIGIN_SYSTEM = { hls: 'hls', 'hls-tuned': 'hls', 'll-hls': 'llhls', dash: 'dash', 'dash-tuned': 'dash', webrtc: 'webrtc' };
 
 async function requestsSince(since) {
   const r = await fetch(`${ORIGIN}/requests?since=${since}`);
@@ -38,9 +44,13 @@ async function requestsSince(since) {
   const browser = await chromium.launch({
     executablePath: EDGE,
     headless: true,
-    args: ['--autoplay-policy=no-user-gesture-required'],
+    // Chrome hides local IPs behind mDNS names in WebRTC candidates; the
+    // relay is on this machine, so hand it plain addresses.
+    args: ['--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns'],
   });
   const results = [];
+  let seed = 20260927;
+  const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
 
   for (let trial = 1; trial <= TRIALS; trial++) {
     // rotate order each trial as well
@@ -51,6 +61,13 @@ async function requestsSince(since) {
       const consoleErrors = [];
       page.on('pageerror', (e) => consoleErrors.push(e.message));
 
+      // Random (seeded) 0-2s wait before each session. Without it the whole
+      // round of sessions took a near-constant 146s = 73 segments, so each
+      // system joined at the same point of the 2s segment cycle in every
+      // trial, and latency — which includes how far into the newest segment
+      // a viewer joins — came out biased per system instead of averaged.
+      const jitterMs = Math.floor(rand() * 2000);
+      await new Promise((r) => setTimeout(r, jitterMs));
       const sep = sys.page.includes('?') ? '&' : '?';
       const url = `${ORIGIN}/web/${sys.page}${sep}system=${sys.id}&trial=${trial}&sample=${SAMPLE}&seeks=${SEEKS}`;
       const startedAt = Date.now();
@@ -65,12 +82,12 @@ async function requestsSince(since) {
       await ctx.close();
 
       const reqs = (await requestsSince(startedAt)).filter((r) => r.at <= endedAt);
-      const system = sys.id.startsWith('hls') ? 'hls' : sys.id.startsWith('dash') ? 'dash' : null;
+      const system = ORIGIN_SYSTEM[sys.id] || null;
       const mine = system ? reqs.filter((r) => r.system === system) : [];
 
       results.push({
         system: sys.id, label: sys.label, trial,
-        wallStart: startedAt, wallEnd: endedAt,
+        wallStart: startedAt, wallEnd: endedAt, jitterMs,
         httpRequests: mine.length,
         httpManifestRequests: mine.filter((r) => r.kind === 'manifest').length,
         ...b,

@@ -1,13 +1,23 @@
 // Command source is the benchmark origin. It runs ONE ffmpeg encoder and
-// tees its output to all three delivery systems at once:
+// tees its output to every delivery system at once:
 //
-//   - ours: fragmented MP4 on stdout → the production demuxer → Redis Streams,
-//     served to viewers by the real server over WebSocket push
+//   - ours: fragmented MP4 (one fragment per 2s GOP) on stdout → the
+//     production demuxer → Redis Streams, served to viewers by the real
+//     server over WebSocket push
 //   - HLS:  fMP4 segments + an EVENT playlist, pushed by ffmpeg over HTTP PUT
 //   - DASH: fMP4 segments + a dynamic MPD, pushed by ffmpeg over HTTP PUT
+//   - low-latency: 200ms fMP4 fragments over TCP, demuxed once and handed
+//     at the same instant to (a) a second Redis stream served by the same
+//     production server ("ours-ll") and (b) an LL-HLS packager (llhls.go)
+//   - WebRTC: H.264 + Opus over RTP, relayed to browsers by pion (webrtc.go)
 //
 // Because every system receives bit-identical frames from the same encoder
 // at the same instant, any measured difference is delivery, not encoding.
+// (WebRTC's audio is Opus, a second encode of the same source: WebRTC
+// can't carry AAC. Video is the same bitstream everywhere.)
+//
+// The encoder runs without B-frames (-bf 0), as low-latency live encoders
+// do: WebRTC can't carry them, and one encoder must serve every system.
 //
 // HLS/DASH are ingested over HTTP into memory rather than written to disk —
 // the way production origins ingest. (Disk also doesn't work here: ffmpeg
@@ -31,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -51,15 +62,61 @@ import (
 type timeline struct {
 	mu         sync.Mutex
 	MovieID    string           `json:"movie_id"`
+	LLMovieID  string           `json:"ll_movie_id"`
 	T0         int64            `json:"t0_ms"` // wall clock when the encoder was started
 	GOPMs      int64            `json:"gop_ms"`
 	Ours       map[int]int64    `json:"ours"` // segment n → wall ms available
 	HLS        map[int]int64    `json:"hls"`
 	DASH       map[int]int64    `json:"dash"` // 0-based, to line up with ours
 	OursSHA256 map[int]string   `json:"ours_sha256"`
+	OursLL     map[int]int64    `json:"ours_ll"` // 200ms fragment n → wall ms XADD returned
+	LLHLS      map[int]int64    `json:"llhls"`   // fragment n → wall ms servable as an LL-HLS part
+	LLFrags    []llFrag         `json:"ll_frags"`
+	WebRTC     *rtpAnchor       `json:"webrtc"`
+	Encoder    *encoderClock    `json:"encoder_clock"` // filled in when the full timeline is served
 	Ended      bool             `json:"ended"`
 	Requests   map[string]int64 `json:"requests"`
 	RequestLog []reqEntry       `json:"-"`
+}
+
+type llFrag struct {
+	Msn     int     `json:"msn"`
+	Part    int     `json:"part"`
+	StartMs float64 `json:"start_ms"` // media time, same timeline as every MSE player
+	DurMs   float64 `json:"dur_ms"`
+	Key     bool    `json:"key"`
+}
+
+// rtpAnchor maps WebRTC's RTP timestamps onto the media timeline the MSE
+// players report: the same keyframe's RTP timestamp and its fMP4 decode
+// time. (Keyframe #1, not #0: the muxer folds AAC priming into the first
+// fMP4 frame's duration, so only from the second GOP on do the two
+// timelines differ by a pure constant.)
+type rtpAnchor struct {
+	RTPTs   uint32  `json:"rtp_ts"`
+	MediaMs float64 `json:"media_ms"`
+	// Keyframe spacing seen on each side, as a consistency check.
+	RTPGapMs   float64 `json:"rtp_gap_ms"`
+	MediaGapMs float64 `json:"media_gap_ms"`
+}
+
+// lite is what the benchmark pages poll: the full timeline grows to tens
+// of thousands of entries, and re-downloading it every second would load
+// the very browser being measured.
+func (t *timeline) lite() map[string]any {
+	edge, llEdge := -1, 0.0
+	for n := range t.Ours {
+		edge = max(edge, n)
+	}
+	if n := len(t.LLFrags); n > 0 {
+		// End of the newest fragment: LL-HLS's hold-back is measured from
+		// the end of the playlist, and ours-ll must start from the same point.
+		llEdge = t.LLFrags[n-1].StartMs + t.LLFrags[n-1].DurMs
+	}
+	return map[string]any{
+		"movie_id": t.MovieID, "ll_movie_id": t.LLMovieID, "t0_ms": t.T0, "gop_ms": t.GOPMs,
+		"ours_edge": edge, "ll_edge_ms": llEdge, "webrtc": t.WebRTC, "ended": t.Ended,
+	}
 }
 
 type reqEntry struct {
@@ -99,7 +156,7 @@ func main() {
 	httpAddr := flag.String("http", ":8095", "ingest + serve HLS/DASH, pages and timeline")
 	webDir := flag.String("web", "bench/web", "benchmark pages")
 	assetsDir := flag.String("assets", "web/assets", "production player assets, served read-only")
-	durSec := flag.Int("duration", 2400, "stop encoding after this many seconds")
+	durSec := flag.Int("duration", 3600, "stop encoding after this many seconds")
 	gop := flag.Int("gop", 2, "segment duration, seconds")
 	flag.Parse()
 
@@ -113,34 +170,58 @@ func main() {
 
 	store := redisstream.NewStore(*redisAddr)
 	defer store.Close()
+	// Keep the whole run: seeks may target any point, and 200ms chunks
+	// would pass the default retention after ~17 minutes.
+	store.SetMaxLen(0)
 
 	room, _, err := store.CreateOrGetRoom(ctx, shortID(), "Benchmark")
 	if err != nil {
 		log.Fatal(err)
 	}
-	movieID := shortID()
+	movieID, llMovieID := shortID(), shortID()
 	if err := store.RegisterMovie(ctx, movieID, room.ID, "Benchmark stream"); err != nil {
+		log.Fatal(err)
+	}
+	if err := store.RegisterMovie(ctx, llMovieID, room.ID, "Benchmark stream (200ms chunks)"); err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
 		// Leave the user's app the way we found it.
 		c := context.Background()
-		_ = store.SetMovieStatus(c, movieID, "ended")
-		_ = store.DeleteMovie(c, movieID)
+		for _, id := range []string{movieID, llMovieID} {
+			_ = store.SetMovieStatus(c, id, "ended")
+			_ = store.DeleteMovie(c, id)
+		}
 		_ = store.DeleteRoom(c, room.ID)
-		log.Printf("cleaned up benchmark movie %s and room %s", movieID, room.ID)
+		log.Printf("cleaned up benchmark movies %s, %s and room %s", movieID, llMovieID, room.ID)
 	}()
 
 	tl := &timeline{
-		MovieID: movieID, GOPMs: int64(*gop) * 1000,
+		MovieID: movieID, LLMovieID: llMovieID, GOPMs: int64(*gop) * 1000,
 		Ours: map[int]int64{}, HLS: map[int]int64{}, DASH: map[int]int64{},
-		OursSHA256: map[int]string{}, Requests: map[string]int64{},
+		OursSHA256: map[int]string{}, OursLL: map[int]int64{}, LLHLS: map[int]int64{},
+		Requests: map[string]int64{},
 	}
 	fs := &memFS{files: map[string][]byte{}}
+	ll := newLLHLS()
+	rtc, err := newRTCOrigin()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := rtc.relay(ctx, "127.0.0.1:47004", rtc.video, true); err != nil {
+		log.Fatal(err)
+	}
+	if err := rtc.relay(ctx, "127.0.0.1:47006", rtc.audio, false); err != nil {
+		log.Fatal(err)
+	}
+	llListener, err := net.Listen("tcp", "127.0.0.1:47010")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Killing a process on Windows skips signal handlers, so cleanup of the
 	// benchmark room would never run; POST /shutdown exits gracefully.
-	go serve(*httpAddr, *webDir, *assetsDir, tl, fs, stop)
+	go serve(*httpAddr, *webDir, *assetsDir, tl, fs, ll, rtc, stop)
 	time.Sleep(200 * time.Millisecond) // listener up before ffmpeg starts uploading
 
 	go func() {
@@ -148,6 +229,7 @@ func main() {
 		defer t.Stop()
 		for {
 			_ = store.Heartbeat(ctx, movieID)
+			_ = store.Heartbeat(ctx, llMovieID)
 			select {
 			case <-ctx.Done():
 				return
@@ -156,27 +238,35 @@ func main() {
 		}
 	}()
 
+	// Stream indexes: 0 video, 1 AAC, 2 Opus (WebRTC only).
 	ingest := `http\://127.0.0.1\:` + port + `/ingest/`
 	tee := strings.Join([]string{
-		`[f=mp4:movflags=+frag_keyframe+empty_moov+default_base_moof]pipe\:1`,
-		fmt.Sprintf(`[f=hls:method=PUT:hls_time=%d:hls_segment_type=fmp4:hls_list_size=0:hls_playlist_type=event]%shls/index.m3u8`, *gop, ingest),
-		fmt.Sprintf(`[f=dash:method=PUT:seg_duration=%d:use_template=1:use_timeline=1:window_size=0]%sdash/manifest.mpd`, *gop, ingest),
+		`[select=0,1:f=mp4:movflags=+frag_keyframe+empty_moov+default_base_moof]pipe\:1`,
+		fmt.Sprintf(`[select=0,1:f=hls:method=PUT:hls_time=%d:hls_segment_type=fmp4:hls_list_size=0:hls_playlist_type=event]%shls/index.m3u8`, *gop, ingest),
+		fmt.Sprintf(`[select=0,1:f=dash:method=PUT:seg_duration=%d:use_template=1:use_timeline=1:window_size=0]%sdash/manifest.mpd`, *gop, ingest),
+		`[select=0,1:f=mp4:movflags=+frag_keyframe+empty_moov+default_base_moof:frag_duration=200000]tcp\://127.0.0.1\:47010`,
+		// dump_extra: with a global header, SPS/PPS live only in extradata;
+		// WebRTC receivers need them in-band before every keyframe.
+		`[select=0:f=rtp:bsfs/v=dump_extra]rtp\://127.0.0.1\:47004?pkt_size=1200`,
+		`[select=2:f=rtp]rtp\://127.0.0.1\:47006?pkt_size=1200`,
 	}, "|")
 
-	// Same encoder settings as production (internal/chunker).
+	// Production encoder settings (internal/chunker) plus -bf 0.
 	args := []string{
 		"-nostats", "-loglevel", "warning",
 		"-re", "-stream_loop", "-1", "-i", *input, "-t", strconv.Itoa(*durSec),
-		"-map", "0:v:0", "-map", "0:a:0",
-		"-c:v", "libx264", "-preset", "veryfast",
+		"-map", "0:v:0", "-map", "0:a:0", "-map", "0:a:0",
+		"-c:v", "libx264", "-preset", "veryfast", "-bf", "0",
 		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", *gop), "-sc_threshold", "0",
-		"-c:a", "aac", "-b:a", "128k",
+		"-c:a:0", "aac", "-b:a:0", "128k",
+		"-c:a:1", "libopus", "-b:a:1", "128k", "-ar:a:1", "48000",
 		// Required with tee: MP4-family outputs need codec config in a global
 		// header (avcC), but tee doesn't advertise that, so without this x264
 		// emits in-band Annex B headers and the MP4 slaves come out malformed.
 		"-flags", "+global_header",
 		"-f", "tee", tee,
 	}
+	go ingestLowLatency(ctx, llListener, store, llMovieID, ll, rtc, tl)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -237,6 +327,91 @@ func main() {
 	<-ctx.Done()
 }
 
+// ingestLowLatency demuxes the 200ms-fragment output once and hands every
+// fragment, at the same instant, to the LL-HLS packager and to a second
+// Redis stream served by the production server (ours-ll). Each consumer
+// has its own goroutine, so neither system waits on the other's write.
+func ingestLowLatency(ctx context.Context, ln net.Listener, store *redisstream.Store, movieID string, ll *llhls, rtc *rtcOrigin, tl *timeline) {
+	conn, err := ln.Accept()
+	ln.Close()
+	if err != nil {
+		log.Printf("low-latency ingest: accept: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	initC := make(chan []byte, 1)
+	fragC := make(chan chunker.Fragment, 64)
+	errC := make(chan error, 1)
+	go func() {
+		errC <- chunker.DemuxFragments(ctx, conn, initC, fragC)
+		close(fragC)
+	}()
+
+	select {
+	case init := <-initC:
+		ll.setInit(init)
+		if err := store.SetInit(ctx, movieID, init); err != nil {
+			log.Printf("low-latency ingest: set init: %v", err)
+			return
+		}
+		_ = store.SetMovieStatus(ctx, movieID, "live")
+	case err := <-errC:
+		log.Printf("low-latency ingest: no init segment: %v", err)
+		return
+	}
+
+	toRedis := make(chan chunker.Fragment, 256)
+	redisDone := make(chan struct{})
+	go func() {
+		defer close(redisDone)
+		for f := range toRedis {
+			if _, err := store.PublishChunk(ctx, movieID, redisstream.Chunk{
+				Seq: f.Seq, PTSMillis: int64(math.Round(f.DecodeMs)), Keyframe: f.Keyframe, Data: f.Data,
+			}); err != nil {
+				log.Printf("ours-ll publish seq=%d: %v", f.Seq, err)
+				continue
+			}
+			tl.mark(tl.OursLL, int(f.Seq), nowMs())
+		}
+	}()
+
+	var keyMs []float64
+	for f := range fragC {
+		msn, part := ll.add(f)
+		at := nowMs()
+		toRedis <- f
+
+		tl.mu.Lock()
+		tl.LLHLS[int(f.Seq)] = at
+		tl.LLFrags = append(tl.LLFrags, llFrag{Msn: msn, Part: part, StartMs: f.DecodeMs, DurMs: f.DurationMs, Key: f.Keyframe})
+		needAnchor := tl.WebRTC == nil
+		tl.mu.Unlock()
+
+		if f.Keyframe {
+			keyMs = append(keyMs, f.DecodeMs)
+		}
+		if rtpKeys := rtc.keyframes(); needAnchor && len(keyMs) >= 3 && len(rtpKeys) >= 3 {
+			a := &rtpAnchor{
+				RTPTs: rtpKeys[1], MediaMs: keyMs[1],
+				RTPGapMs:   float64(int32(rtpKeys[2]-rtpKeys[1])) / 90,
+				MediaGapMs: keyMs[2] - keyMs[1],
+			}
+			tl.mu.Lock()
+			tl.WebRTC = a
+			tl.mu.Unlock()
+			log.Printf("webrtc anchor: rtp %d = media %.1fms (keyframe gap rtp %.1fms, fmp4 %.1fms)", a.RTPTs, a.MediaMs, a.RTPGapMs, a.MediaGapMs)
+		}
+	}
+	close(toRedis)
+	<-redisDone
+	ll.end()
+	_ = store.SetMovieStatus(context.Background(), movieID, "ended")
+	if err := <-errC; err != nil && ctx.Err() == nil {
+		log.Printf("low-latency demux: %v", err)
+	}
+}
+
 var (
 	hlsSegLine    = regexp.MustCompile(`(?m)^index(\d+)\.m4s\s*$`)
 	firstTimeline = regexp.MustCompile(`(?s)<SegmentTimeline>(.*?)</SegmentTimeline>`)
@@ -273,8 +448,16 @@ func markDASH(tl *timeline, mpd []byte, at int64) {
 	}
 }
 
-func serve(addr, webDir, assetsDir string, tl *timeline, fs *memFS, shutdown context.CancelFunc) {
+func serve(addr, webDir, assetsDir string, tl *timeline, fs *memFS, ll *llhls, rtc *rtcOrigin, shutdown context.CancelFunc) {
 	mux := http.NewServeMux()
+	mux.Handle("/out/llhls/", countRequests(tl, ll))
+	mux.HandleFunc("/webrtc/whep", func(w http.ResponseWriter, r *http.Request) {
+		tl.mu.Lock()
+		tl.Requests["webrtc/signal"]++
+		tl.RequestLog = append(tl.RequestLog, reqEntry{At: nowMs(), System: "webrtc", Kind: "signal"})
+		tl.mu.Unlock()
+		rtc.ServeHTTP(w, r)
+	})
 
 	mux.HandleFunc("/ingest/", func(w http.ResponseWriter, r *http.Request) {
 		p := path.Clean(strings.TrimPrefix(r.URL.Path, "/ingest/"))
@@ -323,6 +506,11 @@ func serve(addr, webDir, assetsDir string, tl *timeline, fs *memFS, shutdown con
 		defer tl.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.URL.Query().Get("lite") != "" {
+			_ = json.NewEncoder(w).Encode(tl.lite())
+			return
+		}
+		tl.Encoder = rtc.clock()
 		_ = json.NewEncoder(w).Encode(tl)
 	})
 	mux.HandleFunc("/requests", func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +558,8 @@ func countRequests(tl *timeline, h http.Handler) http.Handler {
 			kind = "manifest"
 		case strings.Contains(rel, "init"):
 			kind = "init"
+		case strings.Contains(rel, "/part"):
+			kind = "part"
 		}
 		tl.mu.Lock()
 		tl.Requests[system+"/"+kind]++
